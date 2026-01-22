@@ -1,58 +1,67 @@
-from fastapi import FastAPI, Depends, HTTPException
-from fastapi.responses import Response
-from sqlalchemy.orm import Session
-from database import SessionLocal, engine
-import models, schemas, crud
-import qrcode
-from io import BytesIO
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+from typing import List
+import json  # <--- [중요] 이게 없어서 에러가 났을 확률이 높습니다!
 
-# DB 테이블 생성
+import models, schemas, crud
+from database import get_db, engine
+from connection_manager import manager # <--- 이것도 꼭 있어야 합니다.
+
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
-# 1. CORS 설정 추가 (매우 중요!)
+# CORS 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 실제 배포 시에는 프론트엔드 도메인만 넣어야 함
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- [중요] get_db 함수는 API들보다 위에 있어야 합니다 ---
-# DB 세션 의존성 주입 (요청 때 열고, 응답 후 닫음)
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# --- 기존 API들 ---
 
-# --- [디버깅용] 1번 사장님 강제 생성 API ---
-@app.post("/users/init/", tags=["Debug"])
-def create_initial_user(db: Session = Depends(get_db)):
-    # 1. 이미 유저가 있는지 확인
-    existing_user = db.query(models.User).filter(models.User.id == 1).first()
-    if existing_user:
-        return {"message": "이미 1번 유저가 있습니다.", "user_id": existing_user.id}
-    
-    # 2. 없으면 생성
-    new_user = models.User(
-        id=1, # 강제로 1번 부여
-        email="boss@kimbap.com",
-        hashed_password="dummy_password",
-        role="OWNER"
-    )
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-    
-    return {"message": "1번 사장님 유저 생성 완료!", "user_id": new_user.id}
+@app.post("/users/", response_model=schemas.UserResponse)
+def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
+    db_user = crud.get_user_by_email(db, email=user.email)
+    if db_user:
+        raise HTTPException(status_code=400, detail="이미 등록된 이메일입니다.")
+    return crud.create_user(db=db, user=user)
 
-# 2. [추가] QR 토큰으로 매장/테이블 정보 찾기 API
-# 프론트엔드가 이 주소를 제일 먼저 호출합니다.
+@app.post("/stores/", response_model=schemas.StoreResponse)
+def create_store(store: schemas.StoreCreate, db: Session = Depends(get_db)):
+    return crud.create_store(db=db, store=store)
+
+@app.get("/stores/{store_id}", response_model=schemas.StoreResponse)
+def read_store(store_id: int, db: Session = Depends(get_db)):
+    db_store = crud.get_store(db, store_id=store_id)
+    if db_store is None:
+        raise HTTPException(status_code=404, detail="Store not found")
+    return db_store
+
+@app.post("/stores/{store_id}/categories/", response_model=schemas.CategoryResponse)
+def create_category_for_store(store_id: int, category: schemas.CategoryCreate, db: Session = Depends(get_db)):
+    return crud.create_category(db=db, category=category, store_id=store_id)
+
+@app.post("/categories/{category_id}/menus/", response_model=schemas.MenuResponse)
+def create_menu_for_category(category_id: int, menu: schemas.MenuCreate, db: Session = Depends(get_db)):
+    return crud.create_menu(db=db, menu=menu, category_id=category_id)
+
+@app.post("/stores/{store_id}/tables/", response_model=schemas.TableResponse)
+def create_table_for_store(store_id: int, table: schemas.TableCreate, db: Session = Depends(get_db)):
+    return crud.create_table(db=db, table=table, store_id=store_id)
+
+@app.get("/tables/{table_id}/qrcode")
+def get_qr_code(table_id: int, db: Session = Depends(get_db)):
+    table = crud.get_table(db, table_id=table_id)
+    if not table:
+        raise HTTPException(status_code=404, detail="Table not found")
+    
+    qr_url = f"http://localhost:5173/order/{table.qr_token}"
+    return {"qr_code_url": qr_url, "qr_token": table.qr_token}
+
 @app.get("/tables/by-token/{qr_token}")
 def get_table_by_token(qr_token: str, db: Session = Depends(get_db)):
     table = db.query(models.Table).filter(models.Table.qr_token == qr_token).first()
@@ -64,53 +73,47 @@ def get_table_by_token(qr_token: str, db: Session = Depends(get_db)):
         "label": table.label
     }
 
-# --- 1. 매장(Store) 관련 API ---
+# --- [Step 5 핵심] 주문 및 알림 ---
 
-@app.post("/stores/", response_model=schemas.StoreResponse)
-def create_store(store: schemas.StoreCreate, db: Session = Depends(get_db)):
-    # 1번 유저(사장님)가 반드시 존재해야 함 (위의 /users/init/ 먼저 실행 필수)
-    return crud.create_store(db=db, store=store)
-
-@app.get("/stores/{store_id}", response_model=schemas.StoreResponse)
-def read_store(store_id: int, db: Session = Depends(get_db)):
-    db_store = crud.get_store(db, store_id=store_id)
-    if db_store is None:
-        raise HTTPException(status_code=404, detail="Store not found")
-    return db_store
-
-# --- 2. 카테고리 & 메뉴 등록 API ---
-
-@app.post("/stores/{store_id}/categories/", response_model=schemas.CategoryResponse)
-def create_category(store_id: int, category: schemas.CategoryCreate, db: Session = Depends(get_db)):
-    return crud.create_category(db=db, category=category, store_id=store_id)
-
-@app.post("/categories/{category_id}/menus/", response_model=schemas.MenuResponse)
-def create_menu(category_id: int, menu: schemas.MenuCreate, db: Session = Depends(get_db)):
-    return crud.create_menu(db=db, menu=menu, category_id=category_id)
-
-# --- 3. 테이블 생성 및 QR 코드 이미지 출력 API ---
-
-@app.post("/stores/{store_id}/tables/", response_model=schemas.TableResponse)
-def create_table(store_id: int, table: schemas.TableCreate, db: Session = Depends(get_db)):
-    return crud.create_table(db=db, table=table, store_id=store_id)
-
-@app.get("/tables/{table_id}/qrcode")
-def get_qr_code(table_id: int, db: Session = Depends(get_db)):
-    # 1. 테이블 정보 조회
-    table = crud.get_table(db, table_id)
-    if not table:
-        raise HTTPException(status_code=404, detail="Table not found")
+@app.post("/orders/", response_model=schemas.OrderResponse)
+async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)):
+    # 1. DB에 주문 저장
+    new_order = crud.create_order(db=db, order=order)
     
-    # 2. QR 코드에 담길 URL 생성
-    qr_data = f"http://localhost:3000/order/{table.qr_token}"
-    
-    # 3. QR 이미지 생성
-    img = qrcode.make(qr_data)
-    buf = BytesIO()
-    
-    # [수정됨] format="PNG" 에러 해결 -> 그냥 "PNG"로 전달
-    img.save(buf, "PNG") 
-    buf.seek(0)
-    
-    # 4. 이미지 파일로 응답
-    return Response(content=buf.getvalue(), media_type="image/png")
+    # 2. 웹소켓 알림 전송 (여기 내용을 수정!)
+    try:
+        # 주문 상세 항목들을 리스트로 변환
+        items_list = []
+        for item in new_order.items:
+            items_list.append({
+                "menu_name": item.menu_name,
+                "quantity": item.quantity,
+                "price": item.price,
+                "subtotal": item.price * item.quantity
+            })
+
+        # 메시지에 items 추가
+        message = json.dumps({
+            "type": "NEW_ORDER",
+            "order_id": new_order.id,
+            "table_id": new_order.table_id,
+            "total_price": new_order.total_price,
+            "created_at": str(new_order.created_at),
+            "items": items_list  # <--- [핵심] 상세 메뉴 리스트 추가됨
+        }, ensure_ascii=False) # 한글 깨짐 방지
+        
+        await manager.broadcast(message, store_id=order.store_id)
+
+    except Exception as e:
+        print(f"알림 전송 중 에러 발생: {e}")
+
+    return new_order
+
+@app.websocket("/ws/{store_id}")
+async def websocket_endpoint(websocket: WebSocket, store_id: int):
+    await manager.connect(websocket, store_id)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, store_id)
