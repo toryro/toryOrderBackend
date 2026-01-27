@@ -287,50 +287,83 @@ def create_admin_user(
     # schemas.UserCreate에 이미 role, store_id, group_id가 포함되어 있으므로 그대로 전달
     return crud.create_user(db=db, user=user)
 
-# 1. 옵션 그룹 생성 (예: 맵기 선택)
-@app.post("/menus/{menu_id}/option-groups/", response_model=schemas.OptionGroupResponse)
-def create_option_group(
-    menu_id: int, 
+# 1. [신규] 가게 공용 옵션 그룹 생성 (Library 생성)
+@app.post("/stores/{store_id}/option-groups/", response_model=schemas.OptionGroupResponse)
+def create_store_option_group(
+    store_id: int, 
     group: schemas.OptionGroupCreate, 
-    db: Session = Depends(get_db),
-    # 보안: 사장님 권한 필요
-    current_user: models.User = Depends(dependencies.require_store_owner)
+    db: Session = Depends(get_db)
 ):
-    # 메뉴 확인
-    menu = db.query(models.Menu).filter(models.Menu.id == menu_id).first()
-    if not menu:
-        raise HTTPException(status_code=404, detail="Menu not found")
-        
-    # 그룹 생성
-    db_group = models.OptionGroup(**group.dict(), menu_id=menu_id)
+    db_group = models.OptionGroup(**group.dict(), store_id=store_id)
     db.add(db_group)
     db.commit()
     db.refresh(db_group)
     return db_group
 
-# 2. 옵션 상세 생성 (예: 아주 매운맛 +500원)
+# 2. [신규] 가게의 모든 옵션 그룹 조회 (Library 목록)
+@app.get("/stores/{store_id}/option-groups/", response_model=List[schemas.OptionGroupResponse])
+def read_store_option_groups(store_id: int, db: Session = Depends(get_db)):
+    return db.query(models.OptionGroup).filter(models.OptionGroup.store_id == store_id).all()
+
+# 3. [기존 유지] 옵션 상세 추가 (예: 달게, 안달게)
 @app.post("/option-groups/{group_id}/options/", response_model=schemas.OptionResponse)
 def create_option(
     group_id: int, 
     option: schemas.OptionCreate, 
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(dependencies.require_store_owner)
+    db: Session = Depends(get_db)
 ):
-    # 그룹 확인
-    group = db.query(models.OptionGroup).filter(models.OptionGroup.id == group_id).first()
-    if not group:
-        raise HTTPException(status_code=404, detail="Option Group not found")
-
-    # 옵션 생성
     db_option = models.Option(**option.dict(), group_id=group_id)
     db.add(db_option)
     db.commit()
     db.refresh(db_option)
     return db_option
 
-# 3. 메뉴별 옵션 목록 조회 (관리자/손님 공용)
+# 4. [핵심] 메뉴에 옵션 그룹 연결하기 (Link)
+@app.post("/menus/{menu_id}/link-option-group/{group_id}")
+def link_option_group_to_menu(
+    menu_id: int, 
+    group_id: int, 
+    db: Session = Depends(get_db)
+):
+    menu = db.query(models.Menu).filter(models.Menu.id == menu_id).first()
+    group = db.query(models.OptionGroup).filter(models.OptionGroup.id == group_id).first()
+    
+    if not menu or not group:
+        raise HTTPException(status_code=404, detail="Menu or Group not found")
+    
+    # 이미 연결되어 있는지 확인
+    if group in menu.option_groups:
+        return {"message": "Already linked"}
+        
+    menu.option_groups.append(group) # 연결 추가
+    db.commit()
+    return {"message": "Linked successfully"}
+
+# 5. [수정] 메뉴별 연결된 옵션 그룹 조회 (주문창용)
 @app.get("/menus/{menu_id}/option-groups/", response_model=List[schemas.OptionGroupResponse])
 def read_menu_options(menu_id: int, db: Session = Depends(get_db)):
-    # 해당 메뉴에 달린 모든 옵션 그룹과 옵션들을 가져옴
-    groups = db.query(models.OptionGroup).filter(models.OptionGroup.menu_id == menu_id).all()
-    return groups
+    menu = db.query(models.Menu).filter(models.Menu.id == menu_id).first()
+    if not menu:
+        return []
+    return menu.option_groups
+
+# 6. [신규] 메뉴에서 옵션 그룹 연결 해제하기 (Unlink)
+@app.delete("/menus/{menu_id}/option-groups/{group_id}")
+def unlink_option_group_from_menu(
+    menu_id: int, 
+    group_id: int, 
+    db: Session = Depends(get_db)
+):
+    menu = db.query(models.Menu).filter(models.Menu.id == menu_id).first()
+    group = db.query(models.OptionGroup).filter(models.OptionGroup.id == group_id).first()
+    
+    if not menu or not group:
+        raise HTTPException(status_code=404, detail="Not found")
+    
+    # 연결 목록에서 해당 그룹 제거
+    if group in menu.option_groups:
+        menu.option_groups.remove(group)
+        db.commit()
+        return {"message": "Unlinked successfully"}
+    
+    return {"message": "Group was not linked"}

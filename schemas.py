@@ -1,8 +1,8 @@
 # schemas.py
-from pydantic import BaseModel
+
+from pydantic import BaseModel, ConfigDict
 from typing import List, Optional
-from datetime import datetime
-from models import UserRole # models.py의 Enum 사용
+from models import UserRole 
 
 # === 1. Base (공통) ===
 class OptionBase(BaseModel):
@@ -12,6 +12,7 @@ class OptionBase(BaseModel):
 class OptionGroupBase(BaseModel):
     name: str
     is_required: bool = False
+    is_single_select: bool = False # 단일 선택 여부
 
 class MenuBase(BaseModel):
     name: str
@@ -26,7 +27,7 @@ class CategoryBase(BaseModel):
 class TableBase(BaseModel):
     name: str
 
-class GroupBase(BaseModel): # [신규]
+class GroupBase(BaseModel):
     name: str
 
 class StoreBase(BaseModel):
@@ -55,17 +56,16 @@ class CategoryCreate(CategoryBase):
 class TableCreate(TableBase):
     pass
 
-class GroupCreate(GroupBase): # [신규]
+class GroupCreate(GroupBase):
     pass
 
 class StoreCreate(StoreBase):
-    # 가게 생성 시 그룹 소속일 수 있음 (선택)
     group_id: Optional[int] = None 
 
 class UserCreate(UserBase):
     password: str
-    role: UserRole = UserRole.STORE_OWNER # 기본값: 사장님
-    group_id: Optional[int] = None # 그룹 관리자일 경우 입력
+    role: UserRole = UserRole.STORE_OWNER
+    group_id: Optional[int] = None
 
 # 주문 상세
 class OrderItemOptionCreate(BaseModel):
@@ -80,53 +80,46 @@ class OrderItemCreate(BaseModel):
 class OrderCreate(OrderBase):
     items: List[OrderItemCreate]
 
-# === 3. Response (응답) ===
+# === 3. Response (응답) - [변경] model_config 사용 ===
 class OptionResponse(OptionBase):
     id: int
     group_id: int
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class OptionGroupResponse(OptionGroupBase):
     id: int
-    menu_id: int
+    store_id: int
     options: List[OptionResponse] = [] 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class MenuResponse(MenuBase):
     id: int
     category_id: int
     option_groups: List[OptionGroupResponse] = [] 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class CategoryResponse(CategoryBase):
     id: int
     store_id: int
     menus: List[MenuResponse] = []
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class TableResponse(TableBase):
     id: int
     store_id: int
     qr_token: Optional[str] = None
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class StoreResponse(StoreBase):
     id: int
     group_id: Optional[int] = None
     categories: List[CategoryResponse] = []
     tables: List[TableResponse] = []
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
-class GroupResponse(GroupBase): # [신규]
+class GroupResponse(GroupBase):
     id: int
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class OrderItem(BaseModel):
     id: int
@@ -134,24 +127,20 @@ class OrderItem(BaseModel):
     price: int
     quantity: int
     options_desc: Optional[str] = None
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class OrderResponse(OrderBase):
     id: int
     total_price: int
-    created_at: str # datetime -> str 변환
+    created_at: str
     is_completed: bool
     items: List[OrderItem] = []
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class UserResponse(UserBase):
     id: int
     is_active: bool
-    role: UserRole      # Enum 타입
+    role: UserRole
     group_id: Optional[int] = None
     store_id: Optional[int] = None
-
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
