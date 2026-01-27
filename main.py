@@ -27,6 +27,7 @@ origins = [
     "http://127.0.0.1:5173",
     "http://localhost:8000",
     "http://127.0.0.1:8000",
+    "http://192.168.0.172:5173"
 ]
 
 app.add_middleware(
@@ -40,7 +41,19 @@ app.add_middleware(
 # --- 🔐 로그인 API ---
 @app.post("/token", response_model=dict)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    # 👇 [추가] 서버가 받는 값을 터미널에 찍어봅니다.
+    print(f"🔍 [로그인 시도] 입력 ID: {form_data.username}")
+    
     user = crud.get_user_by_email(db, email=form_data.username)
+    
+    # 👇 [추가] DB에서 유저를 찾았는지 확인합니다.
+    if user:
+        print(f"✅ [유저 발견] DB ID: {user.email}, Role: {user.role}")
+        is_pw_correct = auth.verify_password(form_data.password, user.hashed_password)
+        print(f"🔑 [비번 검증] 결과: {is_pw_correct}")
+    else:
+        print("❌ [유저 없음] DB에서 해당 이메일을 찾을 수 없습니다.")
+
     if not user or not auth.verify_password(form_data.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -63,7 +76,8 @@ async def upload_image(file: UploadFile = File(...)):
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     # [주의] 본인 IP로 수정!
-    return {"url": f"http://192.168.0.172:8000/images/{filename}"}
+    my_ip = "192.168.0.172" # [수정] 내 IP
+    return {"url": f"http://{my_ip}:8000/images/{filename}"}
 
 # --- 🏢 그룹 API (슈퍼 관리자 전용) [신규 추가] ---
 @app.post("/groups/", response_model=schemas.GroupResponse)
@@ -159,7 +173,13 @@ def get_qr_code(table_id: int, db: Session = Depends(get_db)):
     table = crud.get_table(db, table_id=table_id)
     if not table:
         raise HTTPException(status_code=404, detail="Table not found")
-    qr_url = f"http://192.168.0.172:5173/order/{table.qr_token}" # IP 확인
+    
+    # ⚠️ [수정] localhost 대신 내 IP 주소 입력!
+    my_ip = "192.168.0.172" 
+    
+    # QR을 찍으면 이동할 프론트엔드 주소
+    qr_url = f"http://{my_ip}:5173/order/{table.qr_token}"
+    
     return {"qr_code_url": qr_url, "qr_token": table.qr_token}
 
 @app.get("/tables/by-token/{qr_token}")
@@ -236,3 +256,81 @@ def complete_order(order_id: int, db: Session = Depends(get_db)):
     order.is_completed = True # 완료 상태로 변경
     db.commit()
     return {"message": "Order completed"}
+
+# [신규] 모든 가게 목록 조회 (슈퍼 관리자용)
+@app.get("/admin/stores/", response_model=List[schemas.StoreResponse])
+def read_all_stores(
+    skip: int = 0, 
+    limit: int = 100, 
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.require_super_admin)
+):
+    # crud.py에 get_stores 함수가 없다면 바로 쿼리 작성 (간단하니까요)
+    stores = db.query(models.Store).offset(skip).limit(limit).all()
+    return stores
+
+# [보안] 사장님/관리자 계정 생성 API (슈퍼 관리자 전용)
+# 일반 회원가입과 달리, role(역할)과 store_id(가게)를 지정할 수 있습니다.
+@app.post("/admin/users/", response_model=schemas.UserResponse)
+def create_admin_user(
+    user: schemas.UserCreate, 
+    db: Session = Depends(get_db),
+    # 🔒 철통 보안: 슈퍼 관리자 토큰이 없으면 아예 실행 불가
+    current_user: models.User = Depends(dependencies.require_super_admin)
+):
+    # 1. 이메일 중복 체크
+    db_user = crud.get_user_by_email(db, email=user.email)
+    if db_user:
+        raise HTTPException(status_code=400, detail="이미 등록된 이메일입니다.")
+    
+    # 2. 계정 생성 (crud.create_user 재사용)
+    # schemas.UserCreate에 이미 role, store_id, group_id가 포함되어 있으므로 그대로 전달
+    return crud.create_user(db=db, user=user)
+
+# 1. 옵션 그룹 생성 (예: 맵기 선택)
+@app.post("/menus/{menu_id}/option-groups/", response_model=schemas.OptionGroupResponse)
+def create_option_group(
+    menu_id: int, 
+    group: schemas.OptionGroupCreate, 
+    db: Session = Depends(get_db),
+    # 보안: 사장님 권한 필요
+    current_user: models.User = Depends(dependencies.require_store_owner)
+):
+    # 메뉴 확인
+    menu = db.query(models.Menu).filter(models.Menu.id == menu_id).first()
+    if not menu:
+        raise HTTPException(status_code=404, detail="Menu not found")
+        
+    # 그룹 생성
+    db_group = models.OptionGroup(**group.dict(), menu_id=menu_id)
+    db.add(db_group)
+    db.commit()
+    db.refresh(db_group)
+    return db_group
+
+# 2. 옵션 상세 생성 (예: 아주 매운맛 +500원)
+@app.post("/option-groups/{group_id}/options/", response_model=schemas.OptionResponse)
+def create_option(
+    group_id: int, 
+    option: schemas.OptionCreate, 
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.require_store_owner)
+):
+    # 그룹 확인
+    group = db.query(models.OptionGroup).filter(models.OptionGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Option Group not found")
+
+    # 옵션 생성
+    db_option = models.Option(**option.dict(), group_id=group_id)
+    db.add(db_option)
+    db.commit()
+    db.refresh(db_option)
+    return db_option
+
+# 3. 메뉴별 옵션 목록 조회 (관리자/손님 공용)
+@app.get("/menus/{menu_id}/option-groups/", response_model=List[schemas.OptionGroupResponse])
+def read_menu_options(menu_id: int, db: Session = Depends(get_db)):
+    # 해당 메뉴에 달린 모든 옵션 그룹과 옵션들을 가져옴
+    groups = db.query(models.OptionGroup).filter(models.OptionGroup.menu_id == menu_id).all()
+    return groups

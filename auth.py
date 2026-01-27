@@ -6,9 +6,14 @@ from fastapi.security import OAuth2PasswordBearer
 from fastapi import Depends, HTTPException, status
 from sqlalchemy.orm import Session
 import crud, database, schemas
+import os
+from dotenv import load_dotenv
 
 # [보안 키 설정] 실제 배포 시에는 아주 복잡한 문자열로 바꿔야 합니다!
-SECRET_KEY = "tory_secret_key_change_this_later"
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise ValueError("SECRET_KEY가 설정되지 않았습니다.")
+
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24시간 유효
 
