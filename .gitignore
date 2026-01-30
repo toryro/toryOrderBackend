@@ -12,3 +12,6 @@ venv/
 
 # VS Code
 .vscode/
+
+#img files
+uploads/
