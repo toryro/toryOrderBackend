@@ -208,7 +208,7 @@ async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)
                 "menu_name": item.menu_name,
                 "quantity": item.quantity,
                 "price": item.price, 
-                "options": item.options_desc, # [추가] 옵션 내용도 전송!
+                "options": item.options_desc,
                 "subtotal": item.price * item.quantity
             })
 
@@ -216,6 +216,10 @@ async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)
             "type": "NEW_ORDER",
             "order_id": new_order.id,
             "table_id": new_order.table_id,
+            
+            # 👇 [신규] 실시간 알림에도 테이블 이름 추가!
+            "table_name": new_order.table.name if new_order.table else "포장/미지정", 
+            
             "total_price": new_order.total_price,
             "created_at": str(new_order.created_at),
             "items": items_list
@@ -303,7 +307,9 @@ def create_store_option_group(
 # 2. [신규] 가게의 모든 옵션 그룹 조회 (Library 목록)
 @app.get("/stores/{store_id}/option-groups/", response_model=List[schemas.OptionGroupResponse])
 def read_store_option_groups(store_id: int, db: Session = Depends(get_db)):
-    return db.query(models.OptionGroup).filter(models.OptionGroup.store_id == store_id).all()
+    return db.query(models.OptionGroup)\
+             .filter(models.OptionGroup.store_id == store_id)\
+             .order_by(models.OptionGroup.order_index).all() # 👈 정렬 추가
 
 # 3. [기존 유지] 옵션 상세 추가 (예: 달게, 안달게)
 @app.post("/option-groups/{group_id}/options/", response_model=schemas.OptionResponse)
@@ -329,13 +335,18 @@ def link_option_group_to_menu(
     group = db.query(models.OptionGroup).filter(models.OptionGroup.id == group_id).first()
     
     if not menu or not group:
-        raise HTTPException(status_code=404, detail="Menu or Group not found")
+        raise HTTPException(status_code=404, detail="Not found")
     
     # 이미 연결되어 있는지 확인
-    if group in menu.option_groups:
+    existing_link = db.query(models.MenuOptionLink).filter_by(menu_id=menu_id, option_group_id=group_id).first()
+    if existing_link:
         return {"message": "Already linked"}
-        
-    menu.option_groups.append(group) # 연결 추가
+    
+    # [신규] 연결할 때 순서는 '현재 연결된 갯수 + 1' (맨 뒤에 붙이기)
+    current_count = db.query(models.MenuOptionLink).filter_by(menu_id=menu_id).count()
+    
+    new_link = models.MenuOptionLink(menu_id=menu_id, option_group_id=group_id, order_index=current_count + 1)
+    db.add(new_link)
     db.commit()
     return {"message": "Linked successfully"}
 
@@ -354,16 +365,205 @@ def unlink_option_group_from_menu(
     group_id: int, 
     db: Session = Depends(get_db)
 ):
-    menu = db.query(models.Menu).filter(models.Menu.id == menu_id).first()
-    group = db.query(models.OptionGroup).filter(models.OptionGroup.id == group_id).first()
+    link = db.query(models.MenuOptionLink).filter_by(menu_id=menu_id, option_group_id=group_id).first()
     
-    if not menu or not group:
-        raise HTTPException(status_code=404, detail="Not found")
-    
-    # 연결 목록에서 해당 그룹 제거
-    if group in menu.option_groups:
-        menu.option_groups.remove(group)
+    if link:
+        db.delete(link)
         db.commit()
         return {"message": "Unlinked successfully"}
     
     return {"message": "Group was not linked"}
+
+# 7. [신규] 메뉴별 옵션 그룹 순서 변경 (핵심 기능!) 🌟
+@app.patch("/menus/{menu_id}/option-groups/{group_id}/reorder")
+def reorder_menu_option_group(
+    menu_id: int,
+    group_id: int,
+    payload: dict, # { "order_index": 1 }
+    db: Session = Depends(get_db)
+):
+    new_order = payload.get("order_index")
+    if new_order is None:
+        raise HTTPException(status_code=400, detail="order_index required")
+
+    # 연결고리(Link)를 찾아서 그 순서를 바꿈
+    link = db.query(models.MenuOptionLink).filter_by(menu_id=menu_id, option_group_id=group_id).first()
+    if not link:
+        raise HTTPException(status_code=404, detail="Link not found")
+        
+    link.order_index = int(new_order)
+    db.commit()
+    return {"message": "Order updated"}
+
+# [신규] 옵션 그룹 수정 (순서, 이름, 타입 변경)
+@app.patch("/option-groups/{group_id}")
+def update_option_group(
+    option_id: int, 
+    option_update: schemas.OptionUpdate, 
+    db: Session = Depends(get_db)
+):
+    db_option = db.query(models.Option).filter(models.Option.id == option_id).first()
+    if not db_option:
+        raise HTTPException(status_code=404, detail="Not found")
+        
+    # [핵심 로직] 만약 이 옵션을 '기본값(True)'으로 설정한다면?
+    if option_update.is_default is True:
+        # 같은 그룹에 있는 다른 친구들의 is_default를 싹 다 False로 끕니다.
+        db.query(models.Option).filter(
+            models.Option.group_id == db_option.group_id
+        ).update({"is_default": False})
+        
+    # 값 업데이트
+    if option_update.name is not None:
+        db_option.name = option_update.name
+    if option_update.price is not None:
+        db_option.price = option_update.price
+    if option_update.order_index is not None:
+        db_option.order_index = option_update.order_index
+    if option_update.is_default is not None:
+        db_option.is_default = option_update.is_default
+        
+    db.commit()
+    db.refresh(db_option)
+    return db_option
+
+# 1. [신규] 카테고리 수정
+@app.patch("/categories/{category_id}")
+def update_category(
+    category_id: int, 
+    cat_update: schemas.CategoryUpdate, 
+    db: Session = Depends(get_db)
+):
+    category = db.query(models.Category).filter(models.Category.id == category_id).first()
+    if not category:
+        raise HTTPException(status_code=404, detail="Category not found")
+    
+    if cat_update.name is not None:
+        category.name = cat_update.name
+    # [신규] 설명 수정
+    if cat_update.description is not None:
+        category.description = cat_update.description
+    if cat_update.order_index is not None:
+        category.order_index = cat_update.order_index
+    if cat_update.is_hidden is not None:
+        category.is_hidden = cat_update.is_hidden
+        
+    db.commit()
+    return {"message": "Category updated"}
+
+# [신규] 카테고리 삭제 API
+@app.delete("/categories/{category_id}")
+def delete_category(category_id: int, db: Session = Depends(get_db)):
+    category = db.query(models.Category).filter(models.Category.id == category_id).first()
+    if not category:
+        raise HTTPException(status_code=404, detail="Category not found")
+    db.delete(category) 
+    db.commit()
+    return {"message": "Category deleted"}
+
+# 2. [신규] 메뉴 수정
+@app.patch("/menus/{menu_id}")
+def update_menu(
+    menu_id: int, 
+    menu_update: schemas.MenuUpdate, 
+    db: Session = Depends(get_db)
+):
+    menu = db.query(models.Menu).filter(models.Menu.id == menu_id).first()
+    if not menu:
+        raise HTTPException(status_code=404, detail="Menu not found")
+    
+    # [신규] 카테고리 이동 (소속 변경)
+    if menu_update.category_id is not None:
+        menu.category_id = menu_update.category_id
+
+    if menu_update.name is not None:
+        menu.name = menu_update.name
+    if menu_update.price is not None:
+        menu.price = menu_update.price
+    if menu_update.description is not None:
+        menu.description = menu_update.description
+    if menu_update.is_sold_out is not None:
+        menu.is_sold_out = menu_update.is_sold_out
+    
+    # [신규] 숨김 처리
+    if menu_update.is_hidden is not None:
+        menu.is_hidden = menu_update.is_hidden
+    if menu_update.image_url is not None:
+        menu.image_url = menu_update.image_url
+    # [신규] 순서 변경
+    if menu_update.order_index is not None:
+        menu.order_index = menu_update.order_index
+        
+    db.commit()
+    return {"message": "Menu updated"}
+
+# [신규] 메뉴 삭제
+@app.delete("/menus/{menu_id}")
+def delete_menu(menu_id: int, db: Session = Depends(get_db)):
+    menu = db.query(models.Menu).filter(models.Menu.id == menu_id).first()
+    if not menu:
+        raise HTTPException(status_code=404, detail="Menu not found")
+    
+    db.delete(menu)
+    db.commit()
+    return {"message": "Menu deleted"}
+
+# [신규] 옵션 상세 수정 (순서, 이름, 가격 변경)
+@app.patch("/options/{option_id}")
+def update_option(
+    option_id: int, 
+    option_update: schemas.OptionUpdate, 
+    db: Session = Depends(get_db)
+):
+    db_option = db.query(models.Option).filter(models.Option.id == option_id).first()
+    if not db_option:
+        raise HTTPException(status_code=404, detail="Not found")
+        
+    # 👇 [핵심] 이 부분이 빠져 있어서 저장이 안 된 겁니다!
+    if option_update.is_default is True:
+        # 같은 그룹 내 다른 옵션들의 기본값 해제 (라디오 버튼처럼 동작)
+        db.query(models.Option).filter(
+            models.Option.group_id == db_option.group_id
+        ).update({"is_default": False})
+        
+    # 값 업데이트
+    if option_update.name is not None:
+        db_option.name = option_update.name
+    if option_update.price is not None:
+        db_option.price = option_update.price
+    if option_update.order_index is not None:
+        db_option.order_index = option_update.order_index
+    
+    # 👇 여기도 꼭 있어야 합니다!
+    if option_update.is_default is not None:
+        db_option.is_default = option_update.is_default
+        
+    db.commit()
+    db.refresh(db_option)
+    return db_option
+
+# [신규] 테이블 이름 수정
+@app.patch("/tables/{table_id}")
+def update_table(
+    table_id: int,
+    table_update: schemas.TableUpdate,
+    db: Session = Depends(get_db)
+):
+    table = db.query(models.Table).filter(models.Table.id == table_id).first()
+    if not table:
+        raise HTTPException(status_code=404, detail="Table not found")
+    
+    table.name = table_update.name
+    db.commit()
+    return {"message": "Table updated"}
+
+# [신규] 테이블 삭제
+@app.delete("/tables/{table_id}")
+def delete_table(table_id: int, db: Session = Depends(get_db)):
+    table = db.query(models.Table).filter(models.Table.id == table_id).first()
+    if not table:
+        raise HTTPException(status_code=404, detail="Table not found")
+    
+    db.delete(table)
+    db.commit()
+    return {"message": "Table deleted"}

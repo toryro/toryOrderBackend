@@ -1,3 +1,5 @@
+# models.py (전체 덮어씌우기)
+
 from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, DateTime, Enum as SAEnum, Table
 from sqlalchemy.orm import relationship
 from database import Base
@@ -9,13 +11,13 @@ class UserRole(str, enum.Enum):
     GROUP_ADMIN = "GROUP_ADMIN"
     STORE_OWNER = "STORE_OWNER"
 
-# [핵심] 메뉴-옵션그룹 연결 테이블 (다대다 관계)
-menu_option_link = Table(
-    "menu_option_link",
-    Base.metadata,
-    Column("menu_id", Integer, ForeignKey("menus.id"), primary_key=True),
-    Column("option_group_id", Integer, ForeignKey("option_groups.id"), primary_key=True),
-)
+class MenuOptionLink(Base):
+    __tablename__ = "menu_option_links"
+    menu_id = Column(Integer, ForeignKey("menus.id"), primary_key=True)
+    option_group_id = Column(Integer, ForeignKey("option_groups.id"), primary_key=True)
+    order_index = Column(Integer, default=0)
+    menu = relationship("Menu", back_populates="menu_option_links")
+    group = relationship("OptionGroup", back_populates="menu_links")
 
 class Group(Base):
     __tablename__ = "groups"
@@ -29,13 +31,11 @@ class Store(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)
     group_id = Column(Integer, ForeignKey("groups.id"), nullable=True)
-    
     group = relationship("Group", back_populates="stores")
     owner = relationship("User", back_populates="store")
-    categories = relationship("Category", back_populates="store")
+    categories = relationship("Category", back_populates="store", order_by="Category.order_index")
     tables = relationship("Table", back_populates="store")
     orders = relationship("Order", back_populates="store")
-    # [신규] 가게가 소유한 옵션 그룹 라이브러리
     option_groups = relationship("OptionGroup", back_populates="store")
 
 class User(Base):
@@ -63,9 +63,14 @@ class Category(Base):
     __tablename__ = "categories"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String)
+    # [신규] 카테고리 설명
+    description = Column(String, nullable=True)
+    order_index = Column(Integer, default=0)
+    is_hidden = Column(Boolean, default=False)
+
     store_id = Column(Integer, ForeignKey("stores.id"))
     store = relationship("Store", back_populates="categories")
-    menus = relationship("Menu", back_populates="category")
+    menus = relationship("Menu", back_populates="category", order_by="Menu.order_index", cascade="all, delete-orphan")
 
 class Menu(Base):
     __tablename__ = "menus"
@@ -75,30 +80,42 @@ class Menu(Base):
     description = Column(String, nullable=True)
     is_sold_out = Column(Boolean, default=False)
     image_url = Column(String, nullable=True)
-    category_id = Column(Integer, ForeignKey("categories.id"))
+    order_index = Column(Integer, default=0)
+    is_hidden = Column(Boolean, default=False)
 
+    category_id = Column(Integer, ForeignKey("categories.id"))
     category = relationship("Category", back_populates="menus")
-    option_groups = relationship("OptionGroup", secondary=menu_option_link, back_populates="menus")
+    menu_option_links = relationship("MenuOptionLink", back_populates="menu", cascade="all, delete-orphan")
+
+    @property
+    def option_groups(self):
+        sorted_links = sorted(self.menu_option_links, key=lambda x: x.order_index)
+        groups = []
+        for link in sorted_links:
+            group = link.group
+            group.order_index = link.order_index 
+            groups.append(group)
+        return groups
 
 class OptionGroup(Base):
     __tablename__ = "option_groups"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String)
     is_required = Column(Boolean, default=False)
-    
-    # 👇 여기가 문제였습니다! 이 줄이 꼭 있어야 합니다.
     is_single_select = Column(Boolean, default=False) 
-    
+    order_index = Column(Integer, default=0) 
     store_id = Column(Integer, ForeignKey("stores.id")) 
     store = relationship("Store", back_populates="option_groups")
-    options = relationship("Option", back_populates="group")
-    menus = relationship("Menu", secondary=menu_option_link, back_populates="option_groups")
+    options = relationship("Option", back_populates="group", order_by="Option.order_index")
+    menu_links = relationship("MenuOptionLink", back_populates="group")
 
 class Option(Base):
     __tablename__ = "options"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String)
     price = Column(Integer)
+    order_index = Column(Integer, default=0)
+    is_default = Column(Boolean, default=False) 
     group_id = Column(Integer, ForeignKey("option_groups.id"))
     group = relationship("OptionGroup", back_populates="options")
 
@@ -110,9 +127,15 @@ class Order(Base):
     created_at = Column(String, default=lambda: str(datetime.now()))
     store_id = Column(Integer, ForeignKey("stores.id"))
     table_id = Column(Integer, ForeignKey("tables.id"), nullable=True)
+    
     store = relationship("Store", back_populates="orders")
     table = relationship("Table", back_populates="orders")
     items = relationship("OrderItem", back_populates="order")
+
+    # 👇 [신규] 테이블 이름을 자동으로 가져오는 속성 추가
+    @property
+    def table_name(self):
+        return self.table.name if self.table else "포장/미지정"
 
 class OrderItem(Base):
     __tablename__ = "order_items"
