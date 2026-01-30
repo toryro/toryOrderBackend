@@ -27,7 +27,7 @@ origins = [
     "http://127.0.0.1:5173",
     "http://localhost:8000",
     "http://127.0.0.1:8000",
-    "http://192.168.0.172:5173"
+    "http://192.168.0.151:5173"
 ]
 
 app.add_middleware(
@@ -76,7 +76,7 @@ async def upload_image(file: UploadFile = File(...)):
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     # [주의] 본인 IP로 수정!
-    my_ip = "192.168.0.172" # [수정] 내 IP
+    my_ip = "192.168.0.151" # [수정] 내 IP
     return {"url": f"http://{my_ip}:8000/images/{filename}"}
 
 # --- 🏢 그룹 API (슈퍼 관리자 전용) [신규 추가] ---
@@ -159,11 +159,6 @@ def create_menu_for_category(category_id: int, menu: schemas.MenuCreate, db: Ses
 def create_option_group(menu_id: int, group: schemas.OptionGroupCreate, db: Session = Depends(get_db)):
     return crud.create_option_group(db=db, group=group, menu_id=menu_id)
 
-# [신규] 옵션 그룹에 세부 옵션 추가
-@app.post("/option-groups/{group_id}/options/", response_model=schemas.OptionResponse)
-def create_option(group_id: int, option: schemas.OptionCreate, db: Session = Depends(get_db)):
-    return crud.create_option(db=db, option=option, group_id=group_id)
-
 @app.post("/stores/{store_id}/tables/", response_model=schemas.TableResponse)
 def create_table_for_store(store_id: int, table: schemas.TableCreate, db: Session = Depends(get_db)):
     return crud.create_table(db=db, table=table, store_id=store_id)
@@ -175,7 +170,7 @@ def get_qr_code(table_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Table not found")
     
     # ⚠️ [수정] localhost 대신 내 IP 주소 입력!
-    my_ip = "192.168.0.172" 
+    my_ip = "192.168.0.151" 
     
     # QR을 찍으면 이동할 프론트엔드 주소
     qr_url = f"http://{my_ip}:5173/order/{table.qr_token}"
@@ -197,10 +192,8 @@ def get_table_by_token(qr_token: str, db: Session = Depends(get_db)):
 
 @app.post("/orders/", response_model=schemas.OrderResponse)
 async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)):
-    # 1. DB 저장 (여기서 옵션 가격까지 다 계산됨)
     new_order = crud.create_order(db=db, order=order)
     
-    # 2. 주방으로 알림 전송
     try:
         items_list = []
         for item in new_order.items:
@@ -215,11 +208,9 @@ async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)
         message = json.dumps({
             "type": "NEW_ORDER",
             "order_id": new_order.id,
+            "daily_number": new_order.daily_number, # [신규] 번호(1, 2...) 전송
             "table_id": new_order.table_id,
-            
-            # 👇 [신규] 실시간 알림에도 테이블 이름 추가!
-            "table_name": new_order.table.name if new_order.table else "포장/미지정", 
-            
+            "table_name": new_order.table_name,
             "total_price": new_order.total_price,
             "created_at": str(new_order.created_at),
             "items": items_list
@@ -398,34 +389,26 @@ def reorder_menu_option_group(
 # [신규] 옵션 그룹 수정 (순서, 이름, 타입 변경)
 @app.patch("/option-groups/{group_id}")
 def update_option_group(
-    option_id: int, 
-    option_update: schemas.OptionUpdate, 
+    group_id: int, 
+    group_update: schemas.OptionGroupUpdate, 
     db: Session = Depends(get_db)
 ):
-    db_option = db.query(models.Option).filter(models.Option.id == option_id).first()
-    if not db_option:
-        raise HTTPException(status_code=404, detail="Not found")
-        
-    # [핵심 로직] 만약 이 옵션을 '기본값(True)'으로 설정한다면?
-    if option_update.is_default is True:
-        # 같은 그룹에 있는 다른 친구들의 is_default를 싹 다 False로 끕니다.
-        db.query(models.Option).filter(
-            models.Option.group_id == db_option.group_id
-        ).update({"is_default": False})
-        
-    # 값 업데이트
-    if option_update.name is not None:
-        db_option.name = option_update.name
-    if option_update.price is not None:
-        db_option.price = option_update.price
-    if option_update.order_index is not None:
-        db_option.order_index = option_update.order_index
-    if option_update.is_default is not None:
-        db_option.is_default = option_update.is_default
+    # DB에서 해당 그룹 찾기
+    db_group = db.query(models.OptionGroup).filter(models.OptionGroup.id == group_id).first()
+    if not db_group:
+        raise HTTPException(status_code=404, detail="Option Group not found")
+    
+    # 수정 요청된 내용만 업데이트
+    if group_update.name is not None:
+        db_group.name = group_update.name
+    if group_update.is_single_select is not None:
+        db_group.is_single_select = group_update.is_single_select
+    if group_update.order_index is not None:
+        db_group.order_index = group_update.order_index
         
     db.commit()
-    db.refresh(db_option)
-    return db_option
+    db.refresh(db_group)
+    return db_group
 
 # 1. [신규] 카테고리 수정
 @app.patch("/categories/{category_id}")
@@ -519,22 +502,18 @@ def update_option(
     if not db_option:
         raise HTTPException(status_code=404, detail="Not found")
         
-    # 👇 [핵심] 이 부분이 빠져 있어서 저장이 안 된 겁니다!
     if option_update.is_default is True:
-        # 같은 그룹 내 다른 옵션들의 기본값 해제 (라디오 버튼처럼 동작)
         db.query(models.Option).filter(
             models.Option.group_id == db_option.group_id
         ).update({"is_default": False})
         
-    # 값 업데이트
+    # [중요] 각 필드가 None이 아닐 때만 업데이트해야 기존 값이 유지됩니다.
     if option_update.name is not None:
         db_option.name = option_update.name
     if option_update.price is not None:
         db_option.price = option_update.price
-    if option_update.order_index is not None:
+    if option_update.order_index is not None:  # 👈 이 부분이 있어야 순번이 안 사라집니다!
         db_option.order_index = option_update.order_index
-    
-    # 👇 여기도 꼭 있어야 합니다!
     if option_update.is_default is not None:
         db_option.is_default = option_update.is_default
         
@@ -567,3 +546,69 @@ def delete_table(table_id: int, db: Session = Depends(get_db)):
     db.delete(table)
     db.commit()
     return {"message": "Table deleted"}
+
+# [신규] 가게 정보 수정 (영업시간 설정용)
+@app.patch("/stores/{store_id}")
+def update_store(
+    store_id: int, 
+    store_update: schemas.StoreUpdate, 
+    db: Session = Depends(get_db)
+):
+    store = db.query(models.Store).filter(models.Store.id == store_id).first()
+    if not store:
+        raise HTTPException(status_code=404, detail="Store not found")
+    
+    # 기존 필드
+    if store_update.name is not None: store.name = store_update.name
+    if store_update.address is not None: store.address = store_update.address
+    if store_update.phone is not None: store.phone = store_update.phone
+    if store_update.description is not None: store.description = store_update.description
+    
+    # [신규] 추가된 필드 업데이트
+    if store_update.notice is not None: store.notice = store_update.notice
+    if store_update.origin_info is not None: store.origin_info = store_update.origin_info
+    if store_update.owner_name is not None: store.owner_name = store_update.owner_name
+    if store_update.business_name is not None: store.business_name = store_update.business_name
+    if store_update.business_address is not None: store.business_address = store_update.business_address
+    if store_update.business_number is not None: store.business_number = store_update.business_number
+        
+    db.commit()
+    return {"message": "Store updated"}
+
+# [신규] 요일별 영업시간 일괄 저장 (월~일)
+@app.post("/stores/{store_id}/hours")
+def update_operating_hours(
+    store_id: int,
+    hours: List[schemas.OperatingHourUpdate],
+    db: Session = Depends(get_db)
+):
+    # 기존 시간표 삭제 후 재등록 (간편한 로직)
+    db.query(models.OperatingHour).filter(models.OperatingHour.store_id == store_id).delete()
+    
+    for h in hours:
+        db_hour = models.OperatingHour(
+            store_id=store_id,
+            day_of_week=h.day_of_week,
+            open_time=h.open_time,
+            close_time=h.close_time,
+            is_closed=h.is_closed
+        )
+        db.add(db_hour)
+    
+    db.commit()
+    return {"message": "Hours updated"}
+
+# [신규] 휴일 추가
+@app.post("/stores/{store_id}/holidays")
+def create_holiday(store_id: int, holiday: schemas.HolidayCreate, db: Session = Depends(get_db)):
+    db_holiday = models.Holiday(**holiday.dict(), store_id=store_id)
+    db.add(db_holiday)
+    db.commit()
+    return {"message": "Holiday added"}
+
+# [신규] 휴일 삭제
+@app.delete("/holidays/{holiday_id}")
+def delete_holiday(holiday_id: int, db: Session = Depends(get_db)):
+    db.query(models.Holiday).filter(models.Holiday.id == holiday_id).delete()
+    db.commit()
+    return {"message": "Holiday deleted"}

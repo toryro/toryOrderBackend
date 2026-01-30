@@ -1,6 +1,4 @@
-# models.py (전체 덮어씌우기)
-
-from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, DateTime, Enum as SAEnum, Table
+from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, Date, Time, Enum as SAEnum
 from sqlalchemy.orm import relationship
 from database import Base
 from datetime import datetime
@@ -30,6 +28,23 @@ class Store(Base):
     __tablename__ = "stores"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)
+    
+    # 기본 정보
+    address = Column(String, nullable=True)     # 가게 주소 (손님용)
+    phone = Column(String, nullable=True)       # 전화번호
+    description = Column(String, nullable=True) # 가게 소개
+    
+    # [신규] 추가 정보
+    notice = Column(String, nullable=True)          # 가게 알림(공지사항)
+    origin_info = Column(String, nullable=True)     # 원산지 표시
+    
+    # [신규] 사업자 정보
+    owner_name = Column(String, nullable=True)      # 대표자명
+    business_name = Column(String, nullable=True)   # 상호명
+    business_address = Column(String, nullable=True)# 사업자 주소
+    business_number = Column(String, nullable=True) # 사업자 등록번호
+
+    # (아래 관계 설정 코드는 기존 유지)
     group_id = Column(Integer, ForeignKey("groups.id"), nullable=True)
     group = relationship("Group", back_populates="stores")
     owner = relationship("User", back_populates="store")
@@ -37,6 +52,28 @@ class Store(Base):
     tables = relationship("Table", back_populates="store")
     orders = relationship("Order", back_populates="store")
     option_groups = relationship("OptionGroup", back_populates="store")
+    operating_hours = relationship("OperatingHour", back_populates="store", cascade="all, delete-orphan")
+    holidays = relationship("Holiday", back_populates="store", cascade="all, delete-orphan")
+
+# [신규] 요일별 영업시간 (0:월 ~ 6:일)
+class OperatingHour(Base):
+    __tablename__ = "operating_hours"
+    id = Column(Integer, primary_key=True, index=True)
+    store_id = Column(Integer, ForeignKey("stores.id"))
+    day_of_week = Column(Integer) # 0=월, 1=화 ... 6=일
+    open_time = Column(String, nullable=True) # "09:00"
+    close_time = Column(String, nullable=True) # "22:00"
+    is_closed = Column(Boolean, default=False) # 휴무 여부
+    store = relationship("Store", back_populates="operating_hours")
+
+# [신규] 임시 휴일 지정
+class Holiday(Base):
+    __tablename__ = "holidays"
+    id = Column(Integer, primary_key=True, index=True)
+    store_id = Column(Integer, ForeignKey("stores.id"))
+    date = Column(String) # "2024-02-10"
+    description = Column(String, nullable=True) # "설날 당일 휴무"
+    store = relationship("Store", back_populates="holidays")
 
 class User(Base):
     __tablename__ = "users"
@@ -63,11 +100,9 @@ class Category(Base):
     __tablename__ = "categories"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String)
-    # [신규] 카테고리 설명
     description = Column(String, nullable=True)
     order_index = Column(Integer, default=0)
     is_hidden = Column(Boolean, default=False)
-
     store_id = Column(Integer, ForeignKey("stores.id"))
     store = relationship("Store", back_populates="categories")
     menus = relationship("Menu", back_populates="category", order_by="Menu.order_index", cascade="all, delete-orphan")
@@ -82,7 +117,6 @@ class Menu(Base):
     image_url = Column(String, nullable=True)
     order_index = Column(Integer, default=0)
     is_hidden = Column(Boolean, default=False)
-
     category_id = Column(Integer, ForeignKey("categories.id"))
     category = relationship("Category", back_populates="menus")
     menu_option_links = relationship("MenuOptionLink", back_populates="menu", cascade="all, delete-orphan")
@@ -122,17 +156,16 @@ class Option(Base):
 class Order(Base):
     __tablename__ = "orders"
     id = Column(Integer, primary_key=True, index=True)
+    daily_number = Column(Integer, default=1)
     total_price = Column(Integer)
     is_completed = Column(Boolean, default=False)
     created_at = Column(String, default=lambda: str(datetime.now()))
     store_id = Column(Integer, ForeignKey("stores.id"))
     table_id = Column(Integer, ForeignKey("tables.id"), nullable=True)
-    
     store = relationship("Store", back_populates="orders")
     table = relationship("Table", back_populates="orders")
     items = relationship("OrderItem", back_populates="order")
 
-    # 👇 [신규] 테이블 이름을 자동으로 가져오는 속성 추가
     @property
     def table_name(self):
         return self.table.name if self.table else "포장/미지정"

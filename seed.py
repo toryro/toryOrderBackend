@@ -29,24 +29,39 @@ def reset_and_seed_data():
     print("🌱 기초 데이터 심는 중...")
 
     try:
-        # 3. 그룹 생성 (백종원 컴퍼니)
+        # 3. 그룹 생성
         group = models.Group(name="백종원컴퍼니")
         db.add(group)
         db.commit()
         db.refresh(group)
-        print(f"✅ 그룹 생성: {group.name}")
 
-        # 4. 가게 생성 (홍콩반점)
+        # 4. 가게 생성
         store = models.Store(
             name="홍콩반점 강남점",
+            address="서울시 강남구 역삼동 123-45",
+            phone="02-555-1234",
+            description="맛있는 짬뽕과 짜장면이 있는 곳!",
             group_id=group.id
         )
         db.add(store)
         db.commit()
         db.refresh(store)
-        print(f"✅ 가게 생성: {store.name}")
+        print(f"✅ 가게 생성 완료! [ID: {store.id}] 이름: {store.name}")
 
-        # 5. 슈퍼 관리자 생성 (admin)
+        # [신규] 영업시간 기본값 생성 (월~일)
+        for i in range(7):
+            hour = models.OperatingHour(
+                store_id=store.id,
+                day_of_week=i,
+                open_time="09:00",
+                close_time="21:00",
+                is_closed=False
+            )
+            db.add(hour)
+        db.commit()
+        print("✅ 영업시간 데이터 생성 완료")
+
+        # 5. 관리자 생성
         admin = models.User(
             email="admin@tory.com",
             hashed_password=auth.get_password_hash("admin1234"),
@@ -54,9 +69,8 @@ def reset_and_seed_data():
             is_active=True
         )
         db.add(admin)
-        print(f"✅ 슈퍼 관리자 생성: admin@tory.com")
 
-        # 6. 사장님 계정 생성 (owner)
+        # 6. 사장님 생성
         owner = models.User(
             email="owner@tory.com",
             hashed_password=auth.get_password_hash("1234"),
@@ -66,10 +80,10 @@ def reset_and_seed_data():
         )
         db.add(owner)
         db.commit()
-        print(f"✅ 사장님 생성: owner@tory.com")
+        print(f"✅ 사장님 생성: owner@tory.com (비번: 1234)")
         
-        print("\n🎉 모든 준비가 끝났습니다!")
-        print("👉 이제 서버를 켜고 접속해보세요!")
+        print("\n🎉 준비 완료! 아래 정보를 꼭 확인하세요.")
+        print(f"👉 관리자 페이지 주소: http://localhost:5173/admin/{store.id}")
 
     except Exception as e:
         print(f"❌ 데이터 생성 중 에러 발생: {e}")
