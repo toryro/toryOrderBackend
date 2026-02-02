@@ -9,11 +9,13 @@ import shutil
 import uuid
 import os
 import schemas
+from datetime import datetime, timedelta
 
 import models, schemas, crud, auth
 from database import get_db, engine
 from connection_manager import manager
 import dependencies
+from sqlalchemy import func
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -282,6 +284,26 @@ def create_admin_user(
     # schemas.UserCreate에 이미 role, store_id, group_id가 포함되어 있으므로 그대로 전달
     return crud.create_user(db=db, user=user)
 
+# [신규] 본사(그룹) 관리자가 자기 그룹의 모든 매장 조회
+@app.get("/groups/my/stores", response_model=List[schemas.StoreResponse])
+def read_my_group_stores(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_active_user)
+):
+    # 권한 체크
+    if current_user.role not in [models.UserRole.SUPER_ADMIN, models.UserRole.GROUP_ADMIN]:
+        raise HTTPException(status_code=403, detail="권한이 없습니다.")
+    
+    # 슈퍼 관리자면 전체 조회
+    if current_user.role == models.UserRole.SUPER_ADMIN:
+        return db.query(models.Store).all()
+        
+    # 그룹 관리자면 내 그룹의 가게만 조회
+    if not current_user.group_id:
+        return []
+        
+    return db.query(models.Store).filter(models.Store.group_id == current_user.group_id).all()
+
 # 1. [신규] 가게 공용 옵션 그룹 생성 (Library 생성)
 @app.post("/stores/{store_id}/option-groups/", response_model=schemas.OptionGroupResponse)
 def create_store_option_group(
@@ -405,6 +427,12 @@ def update_option_group(
         db_group.is_single_select = group_update.is_single_select
     if group_update.order_index is not None:
         db_group.order_index = group_update.order_index
+    
+    # 👇 [신규 추가] 필수 선택 여부 & 최대 선택 개수 반영
+    if group_update.is_required is not None:
+        db_group.is_required = group_update.is_required
+    if group_update.max_select is not None:
+        db_group.max_select = group_update.max_select
         
     db.commit()
     db.refresh(db_group)
@@ -548,32 +576,39 @@ def delete_table(table_id: int, db: Session = Depends(get_db)):
     return {"message": "Table deleted"}
 
 # [신규] 가게 정보 수정 (영업시간 설정용)
-@app.patch("/stores/{store_id}")
+@app.patch("/stores/{store_id}", response_model=schemas.StoreResponse)
 def update_store(
     store_id: int, 
     store_update: schemas.StoreUpdate, 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_active_user) # 권한 체크 필요 시
 ):
-    store = db.query(models.Store).filter(models.Store.id == store_id).first()
-    if not store:
+    # 1. 수정할 가게 찾기
+    db_store = db.query(models.Store).filter(models.Store.id == store_id).first()
+    if not db_store:
         raise HTTPException(status_code=404, detail="Store not found")
+
+    # 2. 권한 체크 (슈퍼 관리자, 그룹 관리자, 본인 가게 점주만 가능)
+    if current_user.role != models.UserRole.SUPER_ADMIN:
+        if current_user.role == models.UserRole.GROUP_ADMIN:
+            if db_store.group_id != current_user.group_id:
+                raise HTTPException(status_code=403, detail="권한이 없습니다.")
+        elif current_user.role == models.UserRole.STORE_OWNER:
+            if db_store.id != current_user.store_id:
+                raise HTTPException(status_code=403, detail="본인 가게만 수정 가능합니다.")
+        else:
+             raise HTTPException(status_code=403, detail="권한이 없습니다.")
+
+    # 3. 요청된 필드만 스마트하게 업데이트 (is_open 포함!)
+    update_data = store_update.dict(exclude_unset=True) # 전송된 데이터만 추출
     
-    # 기존 필드
-    if store_update.name is not None: store.name = store_update.name
-    if store_update.address is not None: store.address = store_update.address
-    if store_update.phone is not None: store.phone = store_update.phone
-    if store_update.description is not None: store.description = store_update.description
-    
-    # [신규] 추가된 필드 업데이트
-    if store_update.notice is not None: store.notice = store_update.notice
-    if store_update.origin_info is not None: store.origin_info = store_update.origin_info
-    if store_update.owner_name is not None: store.owner_name = store_update.owner_name
-    if store_update.business_name is not None: store.business_name = store_update.business_name
-    if store_update.business_address is not None: store.business_address = store_update.business_address
-    if store_update.business_number is not None: store.business_number = store_update.business_number
-        
+    for key, value in update_data.items():
+        setattr(db_store, key, value) # DB 모델에 값 적용
+
     db.commit()
-    return {"message": "Store updated"}
+    db.refresh(db_store)
+    
+    return db_store
 
 # [신규] 요일별 영업시간 일괄 저장 (월~일)
 @app.post("/stores/{store_id}/hours")
@@ -612,3 +647,250 @@ def delete_holiday(holiday_id: int, db: Session = Depends(get_db)):
     db.query(models.Holiday).filter(models.Holiday.id == holiday_id).delete()
     db.commit()
     return {"message": "Holiday deleted"}
+
+@app.get("/stores/{store_id}/stats", response_model=schemas.SalesStat)
+def get_store_stats(
+    store_id: int, 
+    start_date: str, 
+    end_date: str, 
+    db: Session = Depends(get_db)
+):
+    # 1. 시작일의 오픈 시간 조회
+    s_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    s_weekday = s_dt.weekday()
+    s_op = db.query(models.OperatingHour).filter(
+        models.OperatingHour.store_id == store_id,
+        models.OperatingHour.day_of_week == s_weekday
+    ).first()
+    
+    # 영업시간 없으면 기본 09:00
+    start_time = s_op.open_time if (s_op and s_op.open_time) else "09:00"
+    
+    # 쿼리 시작점: "선택한 시작일 + 오픈시간"
+    query_start = f"{start_date} {start_time}:00"
+
+    # 2. 종료일 다음날의 오픈 시간 조회 (하루 꽉 채우기 위함)
+    e_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    next_day_dt = e_dt + timedelta(days=1)
+    next_weekday = next_day_dt.weekday()
+    
+    n_op = db.query(models.OperatingHour).filter(
+        models.OperatingHour.store_id == store_id,
+        models.OperatingHour.day_of_week == next_weekday
+    ).first()
+    
+    next_start_time = n_op.open_time if (n_op and n_op.open_time) else "09:00"
+
+    # 쿼리 종료점: "종료일 다음날 + 그날 오픈시간 전까지"
+    # (예: 5일 17:00 ~ 6일 17:00 까지를 5일 매출로 봄)
+    query_end_date_str = next_day_dt.strftime("%Y-%m-%d")
+    query_end = f"{query_end_date_str} {next_start_time}:00"
+
+    print(f"📊 매출 집계 범위: {query_start} ~ {query_end}")
+
+    # 3. 데이터 조회 (완료된 주문만)
+    orders = db.query(models.Order).filter(
+        models.Order.store_id == store_id,
+        models.Order.created_at >= query_start,
+        models.Order.created_at < query_end,
+        models.Order.is_completed == True
+    ).all()
+
+    # 4. 데이터 집계
+    total_revenue = 0
+    hourly_data = {}
+    menu_data = {}
+
+    for order in orders:
+        total_revenue += order.total_price
+        
+        # 시간대 집계
+        try:
+            h = int(order.created_at.split(" ")[1].split(":")[0])
+            hourly_data[h] = hourly_data.get(h, 0) + order.total_price
+        except: pass
+
+        # 메뉴별 집계
+        for item in order.items:
+            line = item.price * item.quantity
+            if item.menu_name not in menu_data:
+                menu_data[item.menu_name] = {"count": 0, "revenue": 0}
+            menu_data[item.menu_name]["count"] += item.quantity
+            menu_data[item.menu_name]["revenue"] += line
+
+    # 리스트 변환 및 정렬
+    hourly_stats = [{"hour": k, "sales": v} for k,v in hourly_data.items()]
+    hourly_stats.sort(key=lambda x: x["hour"])
+
+    menu_stats = [{"name": k, "count": v["count"], "revenue": v["revenue"]} for k,v in menu_data.items()]
+    menu_stats.sort(key=lambda x: x["revenue"], reverse=True)
+
+    return {
+        "total_revenue": total_revenue,
+        "order_count": len(orders),
+        "hourly_stats": hourly_stats,
+        "menu_stats": menu_stats
+    }
+
+# --- 👥 계정 관리 API (신규) ---
+
+# 1. 사용자 목록 조회 (권한별 필터링)
+@app.get("/users/", response_model=List[schemas.UserResponse])
+def read_users(
+    skip: int = 0, 
+    limit: int = 100, 
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_active_user)
+):
+    query = db.query(models.User)
+    
+    # [로직] 슈퍼 관리자는 모두 봄
+    if current_user.role == models.UserRole.SUPER_ADMIN:
+        pass 
+    # [로직] 그룹 관리자는 자기 그룹 사람만 봄
+    elif current_user.role == models.UserRole.GROUP_ADMIN:
+        query = query.filter(models.User.group_id == current_user.group_id)
+    # [로직] 점주는 자기 가게 직원만 봄
+    elif current_user.role == models.UserRole.STORE_OWNER:
+        query = query.filter(models.User.store_id == current_user.store_id)
+    else:
+        return [] # 일반 유저는 목록 조회 불가
+
+    return query.offset(skip).limit(limit).all()
+
+# 2. 계정 생성 (관리자가 하위 계정 생성)
+@app.post("/admin/users/", response_model=schemas.UserResponse)
+def create_sub_user(
+    user: schemas.UserCreate, 
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_active_user)
+):
+    # 권한 체크 로직
+    if current_user.role == models.UserRole.GROUP_ADMIN:
+        # 그룹 관리자는 '점주'나 '직원'만 생성 가능하며, 무조건 본인 그룹으로 귀속됨
+        if user.role in [models.UserRole.SUPER_ADMIN, models.UserRole.GROUP_ADMIN]:
+            raise HTTPException(status_code=403, detail="자신보다 높은 등급은 생성할 수 없습니다.")
+        user.group_id = current_user.group_id # 강제 할당
+
+    elif current_user.role == models.UserRole.STORE_OWNER:
+        # 점주는 '직원'만 생성 가능하며, 본인 가게로 귀속됨
+        if user.role != models.UserRole.STAFF:
+            raise HTTPException(status_code=403, detail="점주는 직원 계정만 생성할 수 있습니다.")
+        user.group_id = current_user.group_id
+        user.store_id = current_user.store_id
+
+    # 이메일 중복 확인
+    if crud.get_user_by_email(db, email=user.email):
+        raise HTTPException(status_code=400, detail="이미 등록된 이메일입니다.")
+        
+    return crud.create_user(db=db, user=user)
+
+# 3. 계정 수정/삭제 (비번 초기화 등)
+@app.patch("/admin/users/{user_id}", response_model=schemas.UserResponse)
+def update_sub_user(
+    user_id: int,
+    user_update: schemas.UserUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_active_user)
+):
+    # 수정 대상 유저 확인
+    target_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    # 권한 체크: 내 하위 조직원인지?
+    if current_user.role != models.UserRole.SUPER_ADMIN:
+        if target_user.group_id != current_user.group_id:
+             raise HTTPException(status_code=403, detail="타 그룹의 계정은 수정할 수 없습니다.")
+             
+    return crud.update_user(db=db, user_id=user_id, user_update=user_update)
+
+@app.delete("/admin/users/{user_id}")
+def delete_sub_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_active_user)
+):
+    target_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    # 슈퍼어드민 삭제 방지
+    if target_user.role == models.UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=400, detail="최고 관리자는 삭제할 수 없습니다.")
+
+    db.delete(target_user)
+    db.commit()
+    return {"message": "User deleted"}
+
+# [신규] 주문 완료 처리 API
+@app.patch("/orders/{order_id}/complete")
+def complete_order(order_id: int, db: Session = Depends(get_db)):
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    
+    order.is_completed = True
+    db.commit()
+    return {"message": "Order completed"}
+
+# [신규] 특정 가게의 주문 목록 조회 (미완료 필터링은 프론트에서 하거나 여기서 수정 가능)
+@app.get("/stores/{store_id}/orders", response_model=List[schemas.OrderResponse])
+def read_store_orders(store_id: int, db: Session = Depends(get_db)):
+    # 최신 주문이 위로 오게 정렬 (내림차순)
+    return db.query(models.Order).filter(models.Order.store_id == store_id).order_by(models.Order.id.desc()).all()
+
+# [신규] 직원 호출 생성 (손님용)
+@app.post("/stores/{store_id}/calls", response_model=schemas.StaffCallResponse)
+def create_staff_call(store_id: int, call: schemas.StaffCallCreate, db: Session = Depends(get_db)):
+    # 테이블 이름 조회를 위해 Table 정보 가져오기
+    table = db.query(models.Table).filter(models.Table.id == call.table_id).first()
+    if not table:
+        raise HTTPException(status_code=404, detail="Table not found")
+
+    db_call = models.StaffCall(
+        store_id=store_id,
+        table_id=call.table_id,
+        message=call.message
+    )
+    db.add(db_call)
+    db.commit()
+    db.refresh(db_call)
+    
+    # 응답 객체 구성 (table_name 포함)
+    return schemas.StaffCallResponse(
+        id=db_call.id,
+        table_id=db_call.table_id,
+        table_name=table.name,
+        message=db_call.message,
+        created_at=db_call.created_at,
+        is_completed=db_call.is_completed
+    )
+
+# [신규] 직원 호출 목록 조회 (직원용 - 미완료된 것만)
+@app.get("/stores/{store_id}/calls", response_model=List[schemas.StaffCallResponse])
+def read_active_calls(store_id: int, db: Session = Depends(get_db)):
+    calls = db.query(models.StaffCall).filter(
+        models.StaffCall.store_id == store_id,
+        models.StaffCall.is_completed == False # 처리 안 된 것만
+    ).all()
+    
+    # Pydantic 모델로 변환 (table_name 매핑)
+    return [
+        schemas.StaffCallResponse(
+            id=c.id, table_id=c.table_id, message=c.message, 
+            created_at=c.created_at, is_completed=c.is_completed,
+            table_name=c.table.name if c.table else "알수없음"
+        ) 
+        for c in calls
+    ]
+
+# [신규] 호출 완료 처리 (직원용)
+@app.patch("/calls/{call_id}/complete")
+def complete_staff_call(call_id: int, db: Session = Depends(get_db)):
+    call = db.query(models.StaffCall).filter(models.StaffCall.id == call_id).first()
+    if not call:
+        raise HTTPException(status_code=404, detail="Call not found")
+    call.is_completed = True
+    db.commit()
+    return {"message": "completed"}

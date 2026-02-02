@@ -42,6 +42,8 @@ class OptionGroupBase(BaseModel):
     is_required: bool = False
     is_single_select: bool = False
     order_index: int = 0 
+    # [신규] 최대 선택 개수 추가 (기존 파일에 없음)
+    max_select: int = 0
 
 class MenuBase(BaseModel):
     name: str
@@ -97,10 +99,12 @@ class StoreUpdate(BaseModel):
     business_number: Optional[str] = None
     open_time: Optional[str] = None
     close_time: Optional[str] = None
+    is_open: Optional[bool] = None # [신규] 수정 가능하도록 추가
 
 # [수정] categories와 tables 필드 복구!
 class StoreResponse(StoreBase):
     id: int
+    is_open: bool # [신규] 응답에 포함
     group_id: Optional[int] = None
     operating_hours: List[OperatingHourResponse] = [] 
     holidays: List[HolidayResponse] = [] 
@@ -114,6 +118,9 @@ class OrderBase(BaseModel):
 
 class UserBase(BaseModel):
     email: str
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    role: UserRole = UserRole.GENERAL_USER
 
 class OptionCreate(OptionBase): pass
 class OptionGroupCreate(OptionGroupBase): pass 
@@ -121,10 +128,19 @@ class MenuCreate(MenuBase): pass
 class CategoryCreate(CategoryBase): pass
 class TableCreate(TableBase): pass
 class GroupCreate(GroupBase): pass
+
 class UserCreate(UserBase):
     password: str
-    role: UserRole = UserRole.STORE_OWNER
     group_id: Optional[int] = None
+    store_id: Optional[int] = None
+
+# [신규] 정보 수정용 (비번 변경 포함)
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    password: Optional[str] = None # 비번 변경 시에만 입력
+    is_active: Optional[bool] = None
+    role: Optional[UserRole] = None
 
 class CategoryUpdate(BaseModel):
     name: Optional[str] = None
@@ -151,6 +167,9 @@ class OptionUpdate(BaseModel):
 class OptionGroupUpdate(BaseModel):
     name: Optional[str] = None
     is_single_select: Optional[bool] = None
+    # [신규] 수정 시에도 반영되도록 추가
+    is_required: Optional[bool] = None
+    max_select: Optional[int] = None
     order_index: Optional[int] = None
 
 class TableUpdate(BaseModel):
@@ -159,10 +178,14 @@ class TableUpdate(BaseModel):
 class OrderItemOptionCreate(BaseModel):
     name: str
     price: int
+
 class OrderItemCreate(BaseModel):
     menu_id: int
     quantity: int
     options: List[OrderItemOptionCreate] = []
+    # 👇 [추가] 옵션 설명 문자열 필드 추가
+    options_desc: Optional[str] = None
+
 class OrderCreate(OrderBase):
     items: List[OrderItemCreate]
 
@@ -220,7 +243,25 @@ class OrderResponse(OrderBase):
 class UserResponse(UserBase):
     id: int
     is_active: bool
-    role: UserRole
     group_id: Optional[int] = None
     store_id: Optional[int] = None
+    model_config = ConfigDict(from_attributes=True)
+
+class SalesStat(BaseModel):
+    total_revenue: int          # 총 매출액
+    order_count: int            # 총 주문 건수
+    hourly_stats: List[dict]    # 시간대별 매출 (예: [{"hour": 17, "sales": 50000}, ...])
+    menu_stats: List[dict]      # 메뉴별 판매량 (예: [{"name": "짜장면", "count": 10, "revenue": 70000}, ...])
+
+class StaffCallCreate(BaseModel):
+    table_id: int
+    message: str = "직원 호출" # 기본값
+
+class StaffCallResponse(BaseModel):
+    id: int
+    table_id: int
+    table_name: str # 편의를 위해 테이블 이름 포함
+    message: str
+    created_at: str
+    is_completed: bool
     model_config = ConfigDict(from_attributes=True)

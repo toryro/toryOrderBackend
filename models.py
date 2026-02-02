@@ -5,9 +5,11 @@ from datetime import datetime
 import enum
 
 class UserRole(str, enum.Enum):
-    SUPER_ADMIN = "SUPER_ADMIN"
-    GROUP_ADMIN = "GROUP_ADMIN"
-    STORE_OWNER = "STORE_OWNER"
+    SUPER_ADMIN = "SUPER_ADMIN"   # 전체 관리자
+    GROUP_ADMIN = "GROUP_ADMIN"   # 본사/중간 관리자
+    STORE_OWNER = "STORE_OWNER"   # 점주
+    STAFF = "STAFF"               # 매장 직원 (신규)
+    GENERAL_USER = "GENERAL_USER" # 일반 고객 (미래 대비)
 
 class MenuOptionLink(Base):
     __tablename__ = "menu_option_links"
@@ -33,7 +35,11 @@ class Store(Base):
     address = Column(String, nullable=True)     # 가게 주소 (손님용)
     phone = Column(String, nullable=True)       # 전화번호
     description = Column(String, nullable=True) # 가게 소개
+    staff_calls = relationship("StaffCall", back_populates="store", cascade="all, delete-orphan")
     
+    # [신규] 영업 상태 강제 설정 (True: 영업중, False: 영업종료)
+    is_open = Column(Boolean, default=True)
+
     # [신규] 추가 정보
     notice = Column(String, nullable=True)          # 가게 알림(공지사항)
     origin_info = Column(String, nullable=True)     # 원산지 표시
@@ -80,10 +86,18 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String)
+    
+    # [신규] 상세 정보 필드
+    name = Column(String, nullable=True)        # 사용자 실명 (예: 백종원)
+    phone = Column(String, nullable=True)       # 연락처 (010-xxxx-xxxx)
+    
     is_active = Column(Boolean, default=True)
-    role = Column(SAEnum(UserRole), default=UserRole.STORE_OWNER)
+    role = Column(SAEnum(UserRole), default=UserRole.GENERAL_USER)
+    
+    # 소속 정보
     group_id = Column(Integer, ForeignKey("groups.id"), nullable=True)
     store_id = Column(Integer, ForeignKey("stores.id"), nullable=True)
+    
     group = relationship("Group", back_populates="admins")
     store = relationship("Store", back_populates="owner")
 
@@ -95,6 +109,7 @@ class Table(Base):
     store_id = Column(Integer, ForeignKey("stores.id"))
     store = relationship("Store", back_populates="tables")
     orders = relationship("Order", back_populates="table")
+    staff_calls = relationship("StaffCall", back_populates="table")
 
 class Category(Base):
     __tablename__ = "categories"
@@ -138,6 +153,10 @@ class OptionGroup(Base):
     is_required = Column(Boolean, default=False)
     is_single_select = Column(Boolean, default=False) 
     order_index = Column(Integer, default=0) 
+    
+    # [신규] 최대 선택 개수 (0: 무제한, 1~N: 제한)
+    max_select = Column(Integer, default=0)
+
     store_id = Column(Integer, ForeignKey("stores.id")) 
     store = relationship("Store", back_populates="option_groups")
     options = relationship("Option", back_populates="group", order_by="Option.order_index")
@@ -179,3 +198,19 @@ class OrderItem(Base):
     quantity = Column(Integer)
     options_desc = Column(String, nullable=True)
     order = relationship("Order", back_populates="items")
+
+class StaffCall(Base):
+    __tablename__ = "staff_calls"
+    id = Column(Integer, primary_key=True, index=True)
+    store_id = Column(Integer, ForeignKey("stores.id"))
+    table_id = Column(Integer, ForeignKey("tables.id"))
+    
+    # [확장성 핵심] 요청 내용 (예: "물", "앞치마", "직원 호출")
+    message = Column(String, default="직원 호출")
+    
+    is_completed = Column(Boolean, default=False) # 처리 여부
+    created_at = Column(String, default=lambda: str(datetime.now()))
+
+    # 관계 설정
+    store = relationship("Store", back_populates="staff_calls")
+    table = relationship("Table", back_populates="staff_calls")
