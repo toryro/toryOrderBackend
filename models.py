@@ -184,6 +184,14 @@ class Order(Base):
     store = relationship("Store", back_populates="orders")
     table = relationship("Table", back_populates="orders")
     items = relationship("OrderItem", back_populates="order")
+    
+    # [신규] 결제 관련 필드 추가
+    # 결제 상태 (PENDING: 대기, PAID: 완료, FAILED: 실패, CANCELLED: 취소)
+    payment_status = Column(String, default="PENDING") 
+    payment_method = Column(String, nullable=True)     # 결제 수단 (카드, 카카오페이 등)
+    imp_uid = Column(String, nullable=True)            # 포트원 결제 고유번호 (환불 시 필수)
+    merchant_uid = Column(String, unique=True, nullable=True) # 우리 시스템 주문 번호
+    paid_amount = Column(Integer, default=0)           # 실제 결제된 금액
 
     @property
     def table_name(self):

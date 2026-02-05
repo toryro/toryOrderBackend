@@ -265,3 +265,8 @@ class StaffCallResponse(BaseModel):
     created_at: str
     is_completed: bool
     model_config = ConfigDict(from_attributes=True)
+
+# [신규] 결제 검증 요청 스키마
+class PaymentVerifyRequest(BaseModel):
+    imp_uid: str       # 포트원 결제 고유번호
+    merchant_uid: str  # 주문번호 (예: order_15)
