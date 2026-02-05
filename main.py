@@ -8,7 +8,7 @@ import json
 import shutil
 import uuid
 import os
-import requests # ✅ requests만 사용
+import requests 
 from datetime import datetime, timedelta
 
 import models, schemas, crud, auth
@@ -40,7 +40,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ✅ [최종 확정] 포트원 V1 API 인증 정보 (여기에만 입력하면 됩니다)
+# ✅ 포트원 API 설정
 PORTONE_API_KEY = "1408482452335854"
 PORTONE_API_SECRET = "3FqFpFpadaj4lWalLiZoZ9pGCSu5jLA1Vzfplm4a6AcNedFxaD6X5QyVwV0Sc2uJN4wtW6Vxakwj6j5d"
 
@@ -71,7 +71,7 @@ async def upload_image(file: UploadFile = File(...)):
     my_ip = "192.168.0.151" 
     return {"url": f"http://{my_ip}:8000/images/{filename}"}
 
-# --- 🏪 가게/메뉴/주문 API (핵심 로직 외 생략 없이 유지) ---
+# --- 🏪 가게/메뉴/주문 API ---
 @app.post("/stores/", response_model=schemas.StoreResponse)
 def create_store(store: schemas.StoreCreate, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_active_user)):
     if current_user.role == models.UserRole.STORE_OWNER and current_user.store_id is not None:
@@ -118,7 +118,7 @@ async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)
 
 @app.websocket("/ws/{store_id}")
 async def websocket_endpoint(websocket: WebSocket, store_id: int):
-    print(f"🔌 [WebSocket] 연결: Store {store_id}", flush=True)
+    print(f"🔌 [WebSocket] 연결 요청: Store {store_id}", flush=True)
     await manager.connect(websocket, store_id)
     try:
         while True: await websocket.receive_text()
@@ -140,16 +140,30 @@ def complete_order(order_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"message": "Order completed"}
 
-# --- 💳 결제 검증 (최적화 버전) ---
+# --- 💳 결제 검증 (중복 방지 & 알림 수정) ---
 @app.post("/payments/complete")
 async def verify_payment(payload: PaymentVerifyRequest, db: Session = Depends(get_db)):
     clean_imp_uid = payload.imp_uid.strip()
     clean_merchant_uid = payload.merchant_uid.strip()
     
-    print(f"🔍 [검증 시작] UID: {clean_imp_uid}", flush=True)
+    # 1. 주문 조회
+    try:
+        order_id = int(clean_merchant_uid.split("_")[1])
+    except:
+        raise HTTPException(status_code=400, detail="잘못된 주문 번호 형식")
+
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order: raise HTTPException(status_code=404, detail="주문을 찾을 수 없습니다.")
+
+    # 🔥 [핵심] 이미 결제된 주문이면, 검증/알림 스킵하고 바로 성공 리턴 (중복 방지)
+    if order.payment_status == "PAID":
+        print(f"⚠️ [중복 요청 방지] 이미 결제된 주문입니다. (Order {order.id})", flush=True)
+        return {"status": "already_paid", "message": "이미 처리된 주문입니다."}
+
+    print(f"🔍 [검증 시작] UID: {clean_imp_uid} -> Order: {order.id}", flush=True)
 
     try:
-        # 1. 토큰 발급
+        # 2. 토큰 발급
         token_res = requests.post("https://api.iamport.kr/users/getToken", json={
             "imp_key": PORTONE_API_KEY, "imp_secret": PORTONE_API_SECRET
         })
@@ -157,7 +171,7 @@ async def verify_payment(payload: PaymentVerifyRequest, db: Session = Depends(ge
             raise HTTPException(status_code=500, detail="PG사 토큰 발급 실패") 
         access_token = token_res.json()["response"]["access_token"]
 
-        # 2. 결제 조회
+        # 3. 결제 조회
         payment_data = None
         
         # [1차] imp_uid 조회
@@ -170,35 +184,23 @@ async def verify_payment(payload: PaymentVerifyRequest, db: Session = Depends(ge
             res2 = requests.get(f"https://api.iamport.kr/payments/find/{clean_merchant_uid}", headers={"Authorization": access_token})
             if res2.status_code == 200: payment_data = res2.json().get("response")
 
-        # [3차] 리스트 수색
-        if not payment_data:
-            print("⚠️ [2차 실패] 리스트 수색", flush=True)
-            res3 = requests.get("https://api.iamport.kr/payments/status/all?limit=10&sorting=-started", headers={"Authorization": access_token})
-            if res3.status_code == 200:
-                for item in res3.json()["response"]["list"]:
-                    if item["imp_uid"] == clean_imp_uid or item["merchant_uid"] == clean_merchant_uid:
-                        payment_data = item
-                        break
-
         if not payment_data:
             raise HTTPException(status_code=404, detail="결제 정보를 찾을 수 없습니다.")
 
-        # 3. DB 검증 및 업데이트
-        order_id = int(clean_merchant_uid.split("_")[1])
-        order = db.query(models.Order).filter(models.Order.id == order_id).first()
-        
-        if not order: raise HTTPException(status_code=404, detail="주문 없음")
-        if int(payment_data['amount']) != order.total_price: raise HTTPException(status_code=400, detail="금액 불일치")
+        # 4. 금액 검증
+        if int(payment_data['amount']) != order.total_price: 
+            raise HTTPException(status_code=400, detail="금액 불일치")
 
+        # 5. DB 업데이트
         order.payment_status = "PAID"
         order.imp_uid = clean_imp_uid
         order.merchant_uid = clean_merchant_uid
         order.paid_amount = payment_data['amount']
         db.commit()
 
-        print(f"💾 [DB 저장] Order {order.id}", flush=True)
+        print(f"💾 [DB 저장] Order {order.id} 결제 완료", flush=True)
 
-        # 4. 주방 알림 전송 (상세 정보 포함)
+        # 6. 주방 알림 전송 (날짜 에러 수정됨)
         try:
             items_list = [{
                 "menu_name": item.menu_name,
@@ -206,11 +208,12 @@ async def verify_payment(payload: PaymentVerifyRequest, db: Session = Depends(ge
                 "options": item.options_desc or ""
             } for item in order.items]
 
-            # ✅ [수정됨] 날짜가 글자(str)여도 에러 안 나게 처리
-            if hasattr(order.created_at, 'strftime'):
-                created_at_str = order.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            # ✅ 날짜를 안전하게 문자열로 변환
+            created_at_val = order.created_at
+            if hasattr(created_at_val, 'strftime'):
+                created_at_str = created_at_val.strftime("%Y-%m-%d %H:%M:%S")
             else:
-                created_at_str = str(order.created_at) # 이미 글자라면 그대로 사용
+                created_at_str = str(created_at_val)
 
             message = json.dumps({
                 "type": "NEW_ORDER",
@@ -233,7 +236,7 @@ async def verify_payment(payload: PaymentVerifyRequest, db: Session = Depends(ge
         print(f"❌ [에러] {e}", flush=True)
         raise HTTPException(status_code=400, detail=str(e))
 
-# (나머지 CRUD API들도 그대로 둡니다. 필요시 추가해주세요)
+# (기타 CRUD API들 유지)
 @app.post("/stores/{store_id}/calls", response_model=schemas.StaffCallResponse)
 def create_staff_call(store_id: int, call: schemas.StaffCallCreate, db: Session = Depends(get_db)):
     table = db.query(models.Table).filter(models.Table.id == call.table_id).first()
