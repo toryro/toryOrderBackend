@@ -5,11 +5,25 @@ from datetime import datetime
 import enum
 
 class UserRole(str, enum.Enum):
-    SUPER_ADMIN = "SUPER_ADMIN"   # 전체 관리자
-    GROUP_ADMIN = "GROUP_ADMIN"   # 본사/중간 관리자
-    STORE_OWNER = "STORE_OWNER"   # 점주
-    STAFF = "STAFF"               # 매장 직원 (신규)
-    GENERAL_USER = "GENERAL_USER" # 일반 고객 (미래 대비)
+    SUPER_ADMIN = "SUPER_ADMIN"
+    BRAND_ADMIN = "BRAND_ADMIN"
+    GROUP_ADMIN = "GROUP_ADMIN"
+    STORE_OWNER = "STORE_OWNER"
+    STAFF = "STAFF"
+    GENERAL_USER = "GENERAL_USER"
+
+class Brand(Base):
+    __tablename__ = "brands"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, index=True)
+    business_number = Column(String, nullable=True)
+    support_email = Column(String, nullable=True)
+    logo_url = Column(String, nullable=True)     # 기존 유지
+    homepage = Column(String, nullable=True)     # 기존 유지
+    
+    groups = relationship("Group", back_populates="brand")
+    stores = relationship("Store", back_populates="brand")
+    admins = relationship("User", back_populates="brand")
 
 class MenuOptionLink(Base):
     __tablename__ = "menu_option_links"
@@ -23,6 +37,8 @@ class Group(Base):
     __tablename__ = "groups"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
+    brand_id = Column(Integer, ForeignKey("brands.id"), nullable=True)
+    brand = relationship("Brand", back_populates="groups")
     stores = relationship("Store", back_populates="group")
     admins = relationship("User", back_populates="group")
 
@@ -30,27 +46,22 @@ class Store(Base):
     __tablename__ = "stores"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)
-    
-    # 기본 정보
-    address = Column(String, nullable=True)     # 가게 주소 (손님용)
-    phone = Column(String, nullable=True)       # 전화번호
-    description = Column(String, nullable=True) # 가게 소개
-    staff_calls = relationship("StaffCall", back_populates="store", cascade="all, delete-orphan")
-    
-    # [신규] 영업 상태 강제 설정 (True: 영업중, False: 영업종료)
+    brand_id = Column(Integer, ForeignKey("brands.id"), nullable=True)
+    brand = relationship("Brand", back_populates="stores")
+    is_direct_manage = Column(Boolean, default=False)
+
+    address = Column(String, nullable=True)
+    phone = Column(String, nullable=True)
+    description = Column(String, nullable=True)
     is_open = Column(Boolean, default=True)
-
-    # [신규] 추가 정보
-    notice = Column(String, nullable=True)          # 가게 알림(공지사항)
-    origin_info = Column(String, nullable=True)     # 원산지 표시
+    notice = Column(String, nullable=True)
+    origin_info = Column(String, nullable=True)
     
-    # [신규] 사업자 정보
-    owner_name = Column(String, nullable=True)      # 대표자명
-    business_name = Column(String, nullable=True)   # 상호명
-    business_address = Column(String, nullable=True)# 사업자 주소
-    business_number = Column(String, nullable=True) # 사업자 등록번호
+    owner_name = Column(String, nullable=True)
+    business_name = Column(String, nullable=True)
+    business_address = Column(String, nullable=True)
+    business_number = Column(String, nullable=True)
 
-    # (아래 관계 설정 코드는 기존 유지)
     group_id = Column(Integer, ForeignKey("groups.id"), nullable=True)
     group = relationship("Group", back_populates="stores")
     owner = relationship("User", back_populates="store")
@@ -60,25 +71,59 @@ class Store(Base):
     option_groups = relationship("OptionGroup", back_populates="store")
     operating_hours = relationship("OperatingHour", back_populates="store", cascade="all, delete-orphan")
     holidays = relationship("Holiday", back_populates="store", cascade="all, delete-orphan")
+    staff_calls = relationship("StaffCall", back_populates="store", cascade="all, delete-orphan")
+    call_options = relationship("CallOption", back_populates="store", cascade="all, delete-orphan")
+    
+    # 🔥 [신규] 재고(Inventory) 연결
+    inventories = relationship("Inventory", back_populates="store", cascade="all, delete-orphan")
 
-# [신규] 요일별 영업시간 (0:월 ~ 6:일)
+# 🔥 [신규] 재고(식자재) 테이블
+class Inventory(Base):
+    __tablename__ = "inventories"
+    id = Column(Integer, primary_key=True, index=True)
+    store_id = Column(Integer, ForeignKey("stores.id"))
+    name = Column(String) # 재료명 (예: 삼겹살, 양파)
+    quantity = Column(Integer, default=0) # 현재 수량
+    unit = Column(String, default="개") # 단위 (g, kg, 개, ml)
+    safe_quantity = Column(Integer, default=10) # 안전재고 (이것보다 적으면 경고)
+    
+    store = relationship("Store", back_populates="inventories")
+    recipe_links = relationship("Recipe", back_populates="inventory", cascade="all, delete-orphan")
+
+# 🔥 [신규] 레시피(메뉴-재고 연결) 테이블
+class Recipe(Base):
+    __tablename__ = "recipes"
+    id = Column(Integer, primary_key=True, index=True)
+    menu_id = Column(Integer, ForeignKey("menus.id"))
+    inventory_id = Column(Integer, ForeignKey("inventories.id"))
+    amount_needed = Column(Integer) # 메뉴 1개당 차감될 양
+    
+    menu = relationship("Menu", back_populates="recipes")
+    inventory = relationship("Inventory", back_populates="recipe_links")
+
+class CallOption(Base):
+    __tablename__ = "call_options"
+    id = Column(Integer, primary_key=True, index=True)
+    store_id = Column(Integer, ForeignKey("stores.id"))
+    name = Column(String)
+    store = relationship("Store", back_populates="call_options")
+
 class OperatingHour(Base):
     __tablename__ = "operating_hours"
     id = Column(Integer, primary_key=True, index=True)
     store_id = Column(Integer, ForeignKey("stores.id"))
-    day_of_week = Column(Integer) # 0=월, 1=화 ... 6=일
-    open_time = Column(String, nullable=True) # "09:00"
-    close_time = Column(String, nullable=True) # "22:00"
-    is_closed = Column(Boolean, default=False) # 휴무 여부
+    day_of_week = Column(Integer)
+    open_time = Column(String, nullable=True)
+    close_time = Column(String, nullable=True)
+    is_closed = Column(Boolean, default=False)
     store = relationship("Store", back_populates="operating_hours")
 
-# [신규] 임시 휴일 지정
 class Holiday(Base):
     __tablename__ = "holidays"
     id = Column(Integer, primary_key=True, index=True)
     store_id = Column(Integer, ForeignKey("stores.id"))
-    date = Column(String) # "2024-02-10"
-    description = Column(String, nullable=True) # "설날 당일 휴무"
+    date = Column(String)
+    description = Column(String, nullable=True)
     store = relationship("Store", back_populates="holidays")
 
 class User(Base):
@@ -86,18 +131,16 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String)
-    
-    # [신규] 상세 정보 필드
-    name = Column(String, nullable=True)        # 사용자 실명 (예: 백종원)
-    phone = Column(String, nullable=True)       # 연락처 (010-xxxx-xxxx)
-    
+    name = Column(String, nullable=True)
+    phone = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
     role = Column(SAEnum(UserRole), default=UserRole.GENERAL_USER)
     
-    # 소속 정보
+    brand_id = Column(Integer, ForeignKey("brands.id"), nullable=True)
     group_id = Column(Integer, ForeignKey("groups.id"), nullable=True)
     store_id = Column(Integer, ForeignKey("stores.id"), nullable=True)
     
+    brand = relationship("Brand", back_populates="admins")
     group = relationship("Group", back_populates="admins")
     store = relationship("Store", back_populates="owner")
 
@@ -135,6 +178,9 @@ class Menu(Base):
     category_id = Column(Integer, ForeignKey("categories.id"))
     category = relationship("Category", back_populates="menus")
     menu_option_links = relationship("MenuOptionLink", back_populates="menu", cascade="all, delete-orphan")
+    
+    # 🔥 [신규] 레시피 연결
+    recipes = relationship("Recipe", back_populates="menu", cascade="all, delete-orphan")
 
     @property
     def option_groups(self):
@@ -153,10 +199,7 @@ class OptionGroup(Base):
     is_required = Column(Boolean, default=False)
     is_single_select = Column(Boolean, default=False) 
     order_index = Column(Integer, default=0) 
-    
-    # [신규] 최대 선택 개수 (0: 무제한, 1~N: 제한)
     max_select = Column(Integer, default=0)
-
     store_id = Column(Integer, ForeignKey("stores.id")) 
     store = relationship("Store", back_populates="option_groups")
     options = relationship("Option", back_populates="group", order_by="Option.order_index")
@@ -181,17 +224,16 @@ class Order(Base):
     created_at = Column(String, default=lambda: str(datetime.now()))
     store_id = Column(Integer, ForeignKey("stores.id"))
     table_id = Column(Integer, ForeignKey("tables.id"), nullable=True)
+    
+    payment_status = Column(String, default="PENDING") 
+    payment_method = Column(String, nullable=True)
+    imp_uid = Column(String, nullable=True)
+    merchant_uid = Column(String, unique=True, nullable=True)
+    paid_amount = Column(Integer, default=0)
+
     store = relationship("Store", back_populates="orders")
     table = relationship("Table", back_populates="orders")
     items = relationship("OrderItem", back_populates="order")
-    
-    # [신규] 결제 관련 필드 추가
-    # 결제 상태 (PENDING: 대기, PAID: 완료, FAILED: 실패, CANCELLED: 취소)
-    payment_status = Column(String, default="PENDING") 
-    payment_method = Column(String, nullable=True)     # 결제 수단 (카드, 카카오페이 등)
-    imp_uid = Column(String, nullable=True)            # 포트원 결제 고유번호 (환불 시 필수)
-    merchant_uid = Column(String, unique=True, nullable=True) # 우리 시스템 주문 번호
-    paid_amount = Column(Integer, default=0)           # 실제 결제된 금액
 
     @property
     def table_name(self):
@@ -212,13 +254,8 @@ class StaffCall(Base):
     id = Column(Integer, primary_key=True, index=True)
     store_id = Column(Integer, ForeignKey("stores.id"))
     table_id = Column(Integer, ForeignKey("tables.id"))
-    
-    # [확장성 핵심] 요청 내용 (예: "물", "앞치마", "직원 호출")
     message = Column(String, default="직원 호출")
-    
-    is_completed = Column(Boolean, default=False) # 처리 여부
+    is_completed = Column(Boolean, default=False)
     created_at = Column(String, default=lambda: str(datetime.now()))
-
-    # 관계 설정
     store = relationship("Store", back_populates="staff_calls")
     table = relationship("Table", back_populates="staff_calls")
