@@ -32,6 +32,8 @@ origins = [
     "http://127.0.0.1:5173",
     "http://localhost:8000",
     "http://127.0.0.1:8000",
+    "http://34.41.197.82:8000",
+    "http://34.41.197.82:5173"
     "http://192.168.0.151:5173"
 ]
 
@@ -71,7 +73,8 @@ async def upload_image(file: UploadFile = File(...)):
     file_path = f"uploads/{filename}"
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
-    my_ip = "192.168.0.151" 
+    # my_ip = "192.168.0.151" 
+    my_ip = "43.41.197.82" 
     return {"url": f"http://{my_ip}:8000/images/{filename}"}
 
 # =========================================================
