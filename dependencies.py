@@ -20,3 +20,10 @@ def require_group_admin(current_user: User = Depends(get_current_active_user)):
     if current_user.role not in [UserRole.SUPER_ADMIN, UserRole.GROUP_ADMIN]:
         raise HTTPException(status_code=403, detail="권한이 없습니다 (Group Admin Only)")
     return current_user
+
+def get_store_user(current_user: User = Depends(get_current_active_user)):
+    if current_user.role not in [UserRole.STORE_OWNER, UserRole.STAFF]:
+        raise HTTPException(status_code=403, detail="매장 권한이 필요합니다.")
+    if not current_user.store_id:
+        raise HTTPException(status_code=403, detail="소속 매장이 없습니다.")
+    return current_user

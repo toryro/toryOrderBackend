@@ -60,22 +60,16 @@ def get_groups(db: Session):
 def get_store(db: Session, store_id: int):
     return db.query(models.Store).filter(models.Store.id == store_id).first()
 
-# 🔥 [수정됨] 매장 생성 함수 (에러 해결 핵심)
 def create_store(db: Session, store: schemas.StoreCreate):
-    # 1. 스키마 데이터를 딕셔너리로 변환
     store_data = store.dict()
-    
-    # 2. Store 모델에 없는 필드 제거 (open_time, close_time 분리)
     open_time = store_data.pop("open_time", "09:00")
     close_time = store_data.pop("close_time", "22:00") 
     
-    # 3. 정제된 데이터로 Store 생성
     db_store = models.Store(**store_data)
     db.add(db_store)
     db.commit()
     db.refresh(db_store)
 
-    # 4. [자동 생성] 요일별 영업시간 기본값 (월~일) 세팅
     default_hours = []
     for day in range(7):
         hour = models.OperatingHour(
@@ -92,7 +86,7 @@ def create_store(db: Session, store: schemas.StoreCreate):
     return db_store
 
 # =========================================================
-# 🍽️ 메뉴 및 카테고리 관리
+# 🍽️ 메뉴 및 카테고리 관리 (🔥 store_id 강제 적용)
 # =========================================================
 def create_category(db: Session, category: schemas.CategoryCreate, store_id: int):
     db_category = models.Category(**category.dict(), store_id=store_id)
@@ -101,24 +95,22 @@ def create_category(db: Session, category: schemas.CategoryCreate, store_id: int
     db.refresh(db_category)
     return db_category
 
-def create_menu(db: Session, menu: schemas.MenuCreate, category_id: int):
-    db_menu = models.Menu(**menu.dict(), category_id=category_id)
+def create_menu(db: Session, menu: schemas.MenuCreate, category_id: int, store_id: int):
+    # 🔥 DB에 메뉴를 생성할 때 무조건 store_id 기록
+    db_menu = models.Menu(**menu.dict(), category_id=category_id, store_id=store_id)
     db.add(db_menu)
     db.commit()
     db.refresh(db_menu)
     return db_menu
 
-def create_option_group(db: Session, group: schemas.OptionGroupCreate, menu_id: int):
-    menu = db.query(models.Menu).filter(models.Menu.id == menu_id).first()
-    store_id = menu.category.store_id
-    
+def create_option_group(db: Session, group: schemas.OptionGroupCreate, menu_id: int, store_id: int):
     db_group = models.OptionGroup(
         name=group.name,
         is_required=group.is_required,
         is_single_select=group.is_single_select,
         max_select=group.max_select, 
         order_index=group.order_index,
-        store_id=store_id
+        store_id=store_id # 🔥 옵션 그룹에도 store_id 기록
     )
     db.add(db_group)
     db.commit()
@@ -129,8 +121,8 @@ def create_option_group(db: Session, group: schemas.OptionGroupCreate, menu_id: 
     db.commit()
     return db_group
 
-def create_option(db: Session, option: schemas.OptionCreate, group_id: int):
-    db_option = models.Option(**option.dict(), group_id=group_id)
+def create_option(db: Session, option: schemas.OptionCreate, group_id: int, store_id: int):
+    db_option = models.Option(**option.dict(), group_id=group_id, store_id=store_id)
     db.add(db_option)
     db.commit()
     db.refresh(db_option)
@@ -147,9 +139,6 @@ def create_table(db: Session, table: schemas.TableCreate, store_id: int):
     db.commit()
     db.refresh(db_table)
     return db_table
-
-def get_table(db: Session, table_id: int):
-    return db.query(models.Table).filter(models.Table.id == table_id).first()
 
 def create_order(db: Session, order: schemas.OrderCreate):
     now = datetime.now()
@@ -193,7 +182,11 @@ def create_order(db: Session, order: schemas.OrderCreate):
 
     total_price = 0
     for item in order.items:
-        menu = db.query(models.Menu).filter(models.Menu.id == item.menu_id).first()
+        # 🔥 주문 항목 생성 시 해당 매장의 메뉴인지 다시 한번 필터링 검증
+        menu = db.query(models.Menu).filter(
+            models.Menu.id == item.menu_id,
+            models.Menu.store_id == order.store_id
+        ).first()
         if not menu: continue
         
         current_item_price = menu.price
@@ -203,6 +196,7 @@ def create_order(db: Session, order: schemas.OrderCreate):
         total_price += current_item_price * item.quantity
 
         db_item = models.OrderItem(
+            store_id=order.store_id, # 🔥 [추가] 상세 주문(OrderItem)도 매장에 소속되도록 강제
             order_id=db_order.id,
             menu_name=menu.name,
             price=current_item_price,

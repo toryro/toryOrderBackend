@@ -24,6 +24,22 @@ models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
+# =========================================================
+# 🚨 [가벼운 실무 대안] 디스코드 긴급 알림 (웹훅) 설정
+# =========================================================
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1478359113657352232/KznjyXP2NUgl8cX1bomvnZPCBm4OqEUyq23g0n0NKuIuvb5G41gJ75qhl0nVMce8Vl73"
+
+def send_discord_alert(message: str):
+    """치명적인 에러 발생 시 디스코드로 실시간 메시지를 쏩니다."""
+    try:
+        # 주소를 넣었을 때만 작동하도록 방어 로직
+        if DISCORD_WEBHOOK_URL and "discord.com" in DISCORD_WEBHOOK_URL:
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": f"🚨 **[토리오더 긴급알림]**\n{message}"})
+    except:
+        pass # 알림을 보내다가 에러가 나더라도 메인 서버는 멈추지 않도록 무시합니다.
+
+# =========================================================
+
 os.makedirs("uploads", exist_ok=True)
 app.mount("/images", StaticFiles(directory="uploads"), name="images")
 
@@ -32,9 +48,7 @@ origins = [
     "http://127.0.0.1:5173",
     "http://localhost:8000",
     "http://127.0.0.1:8000",
-    "http://34.41.197.82:8000",
-    "http://34.41.197.82:5173"
-    "http://192.168.0.151:5173"
+    "http://192.168.0.119:5173"
 ]
 
 app.add_middleware(
@@ -73,15 +87,13 @@ async def upload_image(file: UploadFile = File(...)):
     file_path = f"uploads/{filename}"
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
-    # my_ip = "192.168.0.151" 
-    my_ip = "43.41.197.82" 
+    my_ip = "192.168.0.119" # GCP 외부 IP 반영
     return {"url": f"http://{my_ip}:8000/images/{filename}"}
 
 # =========================================================
 # 🔥 [엔터프라이즈] 브랜드 및 재고 관리 API
 # =========================================================
 
-# 1. 브랜드(본사) 생성
 @app.post("/brands/", response_model=schemas.BrandResponse)
 def create_brand(brand: schemas.BrandCreate, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_active_user)):
     if current_user.role != models.UserRole.SUPER_ADMIN:
@@ -109,7 +121,6 @@ def read_brand(brand_id: int, db: Session = Depends(get_db)):
     if not brand: raise HTTPException(status_code=404, detail="Brand not found")
     return brand
 
-# 2. 그룹 생성
 @app.post("/groups/", response_model=schemas.GroupResponse)
 def create_group(group: schemas.GroupCreate, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_active_user)):
     if current_user.role not in [models.UserRole.SUPER_ADMIN, models.UserRole.BRAND_ADMIN]:
@@ -125,7 +136,6 @@ def create_group(group: schemas.GroupCreate, db: Session = Depends(get_db), curr
     db.refresh(db_group)
     return db_group
 
-# 3. 메뉴 배포
 @app.post("/brands/distribute-menu", response_model=dict)
 def distribute_menu(req: schemas.MenuDistributeRequest, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_active_user)):
     if current_user.role not in [models.UserRole.SUPER_ADMIN, models.UserRole.BRAND_ADMIN]:
@@ -153,71 +163,19 @@ def distribute_menu(req: schemas.MenuDistributeRequest, db: Session = Depends(ge
             db.refresh(target_cat)
 
         for src_menu in source_cat.menus:
-            existing_menu = db.query(models.Menu).filter(models.Menu.category_id == target_cat.id, models.Menu.name == src_menu.name).first()
+            existing_menu = db.query(models.Menu).filter(models.Menu.category_id == target_cat.id, models.Menu.name == src_menu.name, models.Menu.store_id == store.id).first()
             if existing_menu:
                 existing_menu.price = src_menu.price
                 existing_menu.description = src_menu.description
                 existing_menu.image_url = src_menu.image_url
             else:
-                new_menu = models.Menu(name=src_menu.name, price=src_menu.price, description=src_menu.description, image_url=src_menu.image_url, order_index=src_menu.order_index, category_id=target_cat.id)
+                new_menu = models.Menu(name=src_menu.name, price=src_menu.price, description=src_menu.description, image_url=src_menu.image_url, order_index=src_menu.order_index, category_id=target_cat.id, store_id=store.id)
                 db.add(new_menu)
         success_count += 1
 
     db.commit()
     return {"message": f"총 {success_count}개 매장에 메뉴 배포 완료"}
 
-# =========================================================
-# 🔥 [신규 추가] 재고(Inventory) 관리 API
-# =========================================================
-
-# 1. 재고 등록 (입고)
-@app.post("/stores/{store_id}/inventories", response_model=schemas.InventoryResponse)
-def create_inventory(store_id: int, item: schemas.InventoryCreate, db: Session = Depends(get_db)):
-    db_item = models.Inventory(store_id=store_id, name=item.name, quantity=item.quantity, unit=item.unit, safe_quantity=item.safe_quantity)
-    db.add(db_item)
-    db.commit()
-    db.refresh(db_item)
-    return db_item
-
-# 2. 재고 목록 조회
-@app.get("/stores/{store_id}/inventories", response_model=List[schemas.InventoryResponse])
-def read_inventories(store_id: int, db: Session = Depends(get_db)):
-    return db.query(models.Inventory).filter(models.Inventory.store_id == store_id).all()
-
-# 3. 재고 수정 (수량 변경 등)
-@app.patch("/inventories/{id}", response_model=schemas.InventoryResponse)
-def update_inventory(id: int, update: schemas.InventoryUpdate, db: Session = Depends(get_db)):
-    item = db.query(models.Inventory).filter(models.Inventory.id == id).first()
-    if not item: raise HTTPException(status_code=404, detail="Item not found")
-    
-    if update.quantity is not None: item.quantity = update.quantity
-    if update.safe_quantity is not None: item.safe_quantity = update.safe_quantity
-    
-    db.commit()
-    db.refresh(item)
-    return item
-
-# 4. 레시피 연결 (메뉴 - 재료)
-@app.post("/menus/{menu_id}/recipes", response_model=schemas.RecipeResponse)
-def create_recipe(menu_id: int, recipe: schemas.RecipeCreate, db: Session = Depends(get_db)):
-    menu = db.query(models.Menu).filter(models.Menu.id == menu_id).first()
-    inventory = db.query(models.Inventory).filter(models.Inventory.id == recipe.inventory_id).first()
-    
-    if not menu or not inventory: raise HTTPException(status_code=404, detail="Menu or Inventory not found")
-    
-    db_recipe = models.Recipe(menu_id=menu_id, inventory_id=recipe.inventory_id, amount_needed=recipe.amount_needed)
-    db.add(db_recipe)
-    db.commit()
-    db.refresh(db_recipe)
-    
-    return {
-        "id": db_recipe.id,
-        "inventory_name": inventory.name,
-        "amount_needed": db_recipe.amount_needed,
-        "unit": inventory.unit
-    }
-
-# =========================================================
 
 # --- 🏪 가게/메뉴/주문 API ---
 @app.get("/groups/my/stores", response_model=List[schemas.StoreResponse])
@@ -229,17 +187,12 @@ def read_my_stores(db: Session = Depends(get_db), current_user: models.User = De
     return []
 
 # =========================================================
-# 👤 [신규 추가] 계정 관리 API (관리자용)
+# 👤 계정 관리 API (관리자용)
 # =========================================================
-
-# 1. 전체 사용자 목록 조회
 @app.get("/users/", response_model=List[schemas.UserResponse])
 def read_all_users(db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_active_user)):
-    # 1. 슈퍼 관리자: 모든 계정 조회
     if current_user.role == models.UserRole.SUPER_ADMIN:
         return db.query(models.User).all()
-    
-    # 2. 브랜드 관리자: 내 브랜드 소속 계정만 조회 (점주, 직원)
     if current_user.role == models.UserRole.BRAND_ADMIN:
         if not current_user.brand_id:
             return []
@@ -247,34 +200,23 @@ def read_all_users(db: Session = Depends(get_db), current_user: models.User = De
             models.User.brand_id == current_user.brand_id,
             models.User.role.in_([models.UserRole.STORE_OWNER, models.UserRole.STAFF])
         ).all()
-        
     raise HTTPException(status_code=403, detail="조회 권한이 없습니다.")
 
-# 2. 관리자 권한으로 계정 생성 (회원가입 없이 즉시 생성)
 @app.post("/admin/users/", response_model=schemas.UserResponse)
 def create_user_by_admin(user: schemas.UserCreate, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_active_user)):
-    # 권한 체크
-    if current_user.role not in [models.UserRole.SUPER_ADMIN, models.UserRole.BRAND_ADMIN]:
+    if current_user.role not in [models.UserRole.SUPER_ADMIN, models.UserRole.BRAND_ADMIN, models.UserRole.STORE_OWNER]:
         raise HTTPException(status_code=403, detail="계정 생성 권한이 없습니다.")
-
-    # 이메일 중복 체크
     db_user = crud.get_user_by_email(db, email=user.email)
     if db_user:
         raise HTTPException(status_code=400, detail="이미 등록된 이메일입니다.")
-    
-    # 계정 생성 위임 (crud.py 활용)
     return crud.create_user(db=db, user=user)
 
-# 3. 계정 삭제
 @app.delete("/admin/users/{user_id}")
 def delete_user_by_admin(user_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_active_user)):
     if current_user.role != models.UserRole.SUPER_ADMIN:
         raise HTTPException(status_code=403, detail="슈퍼 관리자만 삭제할 수 있습니다.")
-    
     user = db.query(models.User).filter(models.User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
+    if not user: raise HTTPException(status_code=404, detail="User not found")
     db.delete(user)
     db.commit()
     return {"message": "User deleted"}
@@ -296,21 +238,27 @@ def read_store(store_id: int, db: Session = Depends(get_db)):
     if not db_store: raise HTTPException(status_code=404, detail="Store not found")
     return db_store
 
-# ... (중간 생략: 카테고리, 메뉴 생성 등 기존 API 그대로 유지) ...
+# 🔥 카테고리/메뉴 생성 시 매장 권한 확인 적용
 @app.post("/stores/{store_id}/categories/", response_model=schemas.CategoryResponse)
-def create_category_for_store(store_id: int, category: schemas.CategoryCreate, db: Session = Depends(get_db)):
+def create_category_for_store(store_id: int, category: schemas.CategoryCreate, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_store_user)):
+    if current_user.store_id != store_id: raise HTTPException(status_code=403, detail="권한 불일치")
     return crud.create_category(db=db, category=category, store_id=store_id)
 
 @app.post("/categories/{category_id}/menus/", response_model=schemas.MenuResponse)
-def create_menu_for_category(category_id: int, menu: schemas.MenuCreate, db: Session = Depends(get_db)):
-    return crud.create_menu(db=db, menu=menu, category_id=category_id)
+def create_menu_for_category(category_id: int, menu: schemas.MenuCreate, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_store_user)):
+    category = db.query(models.Category).filter(models.Category.id == category_id, models.Category.store_id == current_user.store_id).first()
+    if not category: raise HTTPException(status_code=404, detail="카테고리를 찾을 수 없습니다.")
+    return crud.create_menu(db=db, menu=menu, category_id=category_id, store_id=current_user.store_id)
 
 @app.post("/menus/{menu_id}/option-groups/", response_model=schemas.OptionGroupResponse)
-def create_option_group(menu_id: int, group: schemas.OptionGroupCreate, db: Session = Depends(get_db)):
-    return crud.create_option_group(db=db, group=group, menu_id=menu_id)
+def create_option_group(menu_id: int, group: schemas.OptionGroupCreate, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_store_user)):
+    menu = db.query(models.Menu).filter(models.Menu.id == menu_id, models.Menu.store_id == current_user.store_id).first()
+    if not menu: raise HTTPException(status_code=404, detail="메뉴를 찾을 수 없습니다.")
+    return crud.create_option_group(db=db, group=group, menu_id=menu_id, store_id=current_user.store_id)
 
 @app.post("/stores/{store_id}/tables/", response_model=schemas.TableResponse)
-def create_table_for_store(store_id: int, table: schemas.TableCreate, db: Session = Depends(get_db)):
+def create_table_for_store(store_id: int, table: schemas.TableCreate, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_store_user)):
+    if store_id != current_user.store_id: raise HTTPException(status_code=403, detail="권한 불일치")
     return crud.create_table(db=db, table=table, store_id=store_id)
 
 @app.get("/tables/by-token/{qr_token}")
@@ -319,40 +267,23 @@ def get_table_by_token(qr_token: str, db: Session = Depends(get_db)):
     if not table: raise HTTPException(status_code=404, detail="유효하지 않은 QR 코드입니다.")
     return {"store_id": table.store_id, "table_id": table.id, "label": table.name}
 
-# --- 🔥 [대폭 수정] 주문 생성 (재고 차감 로직 적용) ---
+# --- 🔥 주문 생성 (손님 API - 교차 검증 적용) ---
 @app.post("/orders/", response_model=schemas.OrderResponse)
 async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)):
-    # 1. 재고 확인 (Stock Check)
-    deduct_list = {} # {inventory_id: deduct_amount}
+    deduct_list = {} 
     
     for item in order.items:
-        menu = db.query(models.Menu).filter(models.Menu.id == item.menu_id).first()
-        if not menu: continue
+        # 🔥 교차 검증: 요청된 메뉴가 결제하려는 해당 매장의 메뉴인지 강제 확인
+        menu = db.query(models.Menu).filter(
+            models.Menu.id == item.menu_id,
+            models.Menu.store_id == order.store_id # 👈 손님의 악의적 조작 방어
+        ).first()
+        if not menu: 
+            raise HTTPException(status_code=400, detail=f"잘못된 메뉴 요청입니다 (ID: {item.menu_id})")
         
-        # 메뉴에 연결된 레시피 확인
-        for recipe in menu.recipes:
-            needed = recipe.amount_needed * item.quantity
-            current_deduct = deduct_list.get(recipe.inventory_id, 0)
-            deduct_list[recipe.inventory_id] = current_deduct + needed
-
-    # 2. 재고 부족 여부 검사
-    for inv_id, amount in deduct_list.items():
-        inventory = db.query(models.Inventory).filter(models.Inventory.id == inv_id).first()
-        if not inventory: continue
-        
-        if inventory.quantity < amount:
-            raise HTTPException(status_code=400, detail=f"재고 부족: {inventory.name} (남은 양: {inventory.quantity}, 필요 양: {amount})")
-
-    # 3. 주문 생성 (기존 로직)
     created_order = crud.create_order(db=db, order=order)
 
-    # 4. 재고 실제 차감 (Deduct)
-    for inv_id, amount in deduct_list.items():
-        inventory = db.query(models.Inventory).filter(models.Inventory.id == inv_id).first()
-        inventory.quantity -= amount
-    
     db.commit()
-    
     return created_order
 
 @app.websocket("/ws/{store_id}")
@@ -360,6 +291,7 @@ async def websocket_endpoint(websocket: WebSocket, store_id: int):
     store_id_int = int(store_id)
     print(f"🔌 [WebSocket] 연결 요청: Store {store_id_int}", flush=True)
     await manager.connect(websocket, store_id_int)
+    
     try:
         while True:
             await websocket.receive_text()
@@ -368,21 +300,25 @@ async def websocket_endpoint(websocket: WebSocket, store_id: int):
         manager.disconnect(websocket, store_id_int)
 
 @app.get("/stores/{store_id}/orders", response_model=List[schemas.OrderResponse]) 
-def read_store_orders(store_id: int, db: Session = Depends(get_db)):
+def read_store_orders(store_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_store_user)):
+    if store_id != current_user.store_id: raise HTTPException(status_code=403, detail="권한 불일치")
     return db.query(models.Order).filter(
         models.Order.store_id == store_id,
         models.Order.payment_status == "PAID"
     ).order_by(models.Order.id.desc()).all()
 
 @app.patch("/orders/{order_id}/complete")
-def complete_order(order_id: int, db: Session = Depends(get_db)):
-    order = db.query(models.Order).filter(models.Order.id == order_id).first()
-    if not order: raise HTTPException(status_code=404, detail="Order not found")
+def complete_order(order_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_store_user)):
+    order = db.query(models.Order).filter(
+        models.Order.id == order_id, 
+        models.Order.store_id == current_user.store_id
+    ).first()
+    if not order: raise HTTPException(status_code=404, detail="권한이 없거나 주문을 찾을 수 없습니다.")
     order.is_completed = True 
     db.commit()
     return {"message": "Order completed"}
 
-# --- 💳 결제 검증 (중복 방지 & 알림 수정) ---
+# --- 💳 결제 검증 (🔥 에러 발생 시 디스코드 알림 발송!) ---
 @app.post("/payments/complete")
 async def verify_payment(payload: PaymentVerifyRequest, db: Session = Depends(get_db)):
     clean_imp_uid = payload.imp_uid.strip()
@@ -398,8 +334,6 @@ async def verify_payment(payload: PaymentVerifyRequest, db: Session = Depends(ge
 
     if order.payment_status == "PAID":
         return {"status": "already_paid", "message": "이미 처리된 주문입니다."}
-
-    print(f"🔍 [검증 시작] UID: {clean_imp_uid} -> Order: {order.id}", flush=True)
 
     try:
         token_res = requests.post("https://api.iamport.kr/users/getToken", json={
@@ -464,16 +398,20 @@ async def verify_payment(payload: PaymentVerifyRequest, db: Session = Depends(ge
             }
 
     except Exception as e:
+        # 🔥 여기서 디스코드로 에러 메시지를 쏩니다!
+        send_discord_alert(f"결제 검증 중 치명적 에러 발생!\n내용: {str(e)}")
         print(f"❌ [에러] {e}", flush=True)
         raise HTTPException(status_code=400, detail=str(e))
 
 # --- 직원 호출 옵션 관리 ---
 @app.get("/stores/{store_id}/call-options", response_model=List[schemas.CallOptionResponse])
-def get_call_options(store_id: int, db: Session = Depends(get_db)):
+def get_call_options(store_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_store_user)):
+    if store_id != current_user.store_id: raise HTTPException(status_code=403, detail="권한 불일치")
     return db.query(models.CallOption).filter(models.CallOption.store_id == store_id).all()
 
 @app.post("/stores/{store_id}/call-options", response_model=schemas.CallOptionResponse)
-def create_call_option(store_id: int, option: schemas.CallOptionCreate, db: Session = Depends(get_db)):
+def create_call_option(store_id: int, option: schemas.CallOptionCreate, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_store_user)):
+    if store_id != current_user.store_id: raise HTTPException(status_code=403, detail="권한 불일치")
     new_option = models.CallOption(store_id=store_id, name=option.name)
     db.add(new_option)
     db.commit()
@@ -481,17 +419,20 @@ def create_call_option(store_id: int, option: schemas.CallOptionCreate, db: Sess
     return new_option
 
 @app.delete("/call-options/{option_id}")
-def delete_call_option(option_id: int, db: Session = Depends(get_db)):
-    option = db.query(models.CallOption).filter(models.CallOption.id == option_id).first()
-    if not option: raise HTTPException(status_code=404, detail="Option not found")
+def delete_call_option(option_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_store_user)):
+    option = db.query(models.CallOption).filter(
+        models.CallOption.id == option_id,
+        models.CallOption.store_id == current_user.store_id
+    ).first()
+    if not option: raise HTTPException(status_code=404, detail="권한이 없거나 찾을 수 없습니다.")
     db.delete(option)
     db.commit()
     return {"message": "deleted"}
 
-# (직원 호출 알림)
+# (직원 호출 알림 - 손님 API, 문지기 없음)
 @app.post("/stores/{store_id}/calls", response_model=schemas.StaffCallResponse)
 async def create_staff_call(store_id: int, call: schemas.StaffCallCreate, db: Session = Depends(get_db)):
-    table = db.query(models.Table).filter(models.Table.id == call.table_id).first()
+    table = db.query(models.Table).filter(models.Table.id == call.table_id, models.Table.store_id == store_id).first() 
     if not table: raise HTTPException(status_code=404, detail="Table not found")
 
     db_call = models.StaffCall(store_id=store_id, table_id=call.table_id, message=call.message)
@@ -525,13 +466,18 @@ async def create_staff_call(store_id: int, call: schemas.StaffCallCreate, db: Se
     )
 
 @app.get("/stores/{store_id}/calls", response_model=List[schemas.StaffCallResponse])
-def read_active_calls(store_id: int, db: Session = Depends(get_db)):
+def read_active_calls(store_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_store_user)):
+    if store_id != current_user.store_id: raise HTTPException(status_code=403, detail="권한 불일치")
     calls = db.query(models.StaffCall).filter(models.StaffCall.store_id == store_id, models.StaffCall.is_completed == False).all()
     return [schemas.StaffCallResponse(id=c.id, table_id=c.table_id, message=c.message, created_at=c.created_at, is_completed=c.is_completed, table_name=c.table.name if c.table else "Unknown") for c in calls]
 
 @app.patch("/calls/{call_id}/complete")
-def complete_staff_call(call_id: int, db: Session = Depends(get_db)):
-    call = db.query(models.StaffCall).filter(models.StaffCall.id == call_id).first()
+def complete_staff_call(call_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_store_user)):
+    call = db.query(models.StaffCall).filter(
+        models.StaffCall.id == call_id,
+        models.StaffCall.store_id == current_user.store_id
+    ).first()
+    if not call: raise HTTPException(status_code=404, detail="권한이 없거나 찾을 수 없습니다.")
     call.is_completed = True
     db.commit()
     return {"message": "completed"}

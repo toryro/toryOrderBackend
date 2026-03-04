@@ -1,0 +1,8 @@
+global:
+  scrape_interval: 5s # 5초마다 데이터를 긁어옵니다.
+
+scrape_configs:
+  - job_name: 'tory_backend'
+    static_configs:
+      # 🔥 중요: 도커 컨테이너에서 맥북 로컬(호스트)에 떠있는 FastAPI(8000번)에 접근하는 주소입니다.
+      - targets: ['host.docker.internal:8000']
