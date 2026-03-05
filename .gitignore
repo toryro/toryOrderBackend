@@ -4,8 +4,10 @@
 # Python
 __pycache__/
 *.py[cod]
-venv/
+.venv/
 .env
+.env.*
+*.env
 
 # Docker
 .docker/

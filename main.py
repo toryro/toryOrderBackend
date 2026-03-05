@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import OAuth2PasswordRequestForm
@@ -24,10 +24,18 @@ models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 모든 도메인에서의 접근을 허용 (상용화 시에는 프론트엔드 도메인만 넣어야 함)
+    allow_credentials=True,
+    allow_methods=["*"],  # GET, POST, OPTIONS 등 모든 통신 방법 허용
+    allow_headers=["*"],  # 모든 헤더(토큰 포함) 허용
+)
+
 # =========================================================
 # 🚨 [가벼운 실무 대안] 디스코드 긴급 알림 (웹훅) 설정
 # =========================================================
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1478359113657352232/KznjyXP2NUgl8cX1bomvnZPCBm4OqEUyq23g0n0NKuIuvb5G41gJ75qhl0nVMce8Vl73"
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 def send_discord_alert(message: str):
     """치명적인 에러 발생 시 디스코드로 실시간 메시지를 쏩니다."""
@@ -47,21 +55,20 @@ origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:8000",
-    "http://127.0.0.1:8000",
-    "http://192.168.0.119:5173"
+    "http://127.0.0.1:8000"
 ]
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=origins,
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
 
 # ✅ 포트원 API 설정
-PORTONE_API_KEY = "1408482452335854"
-PORTONE_API_SECRET = "3FqFpFpadaj4lWalLiZoZ9pGCSu5jLA1Vzfplm4a6AcNedFxaD6X5QyVwV0Sc2uJN4wtW6Vxakwj6j5d"
+PORTONE_API_KEY = os.getenv("PORTONE_API_KEY")
+PORTONE_API_SECRET = os.getenv("PORTONE_API_SECRET")
 
 # --- 🔐 로그인 API ---
 @app.post("/token", response_model=dict)
@@ -87,7 +94,7 @@ async def upload_image(file: UploadFile = File(...)):
     file_path = f"uploads/{filename}"
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
-    my_ip = "192.168.0.119" # GCP 외부 IP 반영
+    my_ip = "127.0.0.1" # GCP 외부 IP 반영
     return {"url": f"http://{my_ip}:8000/images/{filename}"}
 
 # =========================================================
@@ -287,17 +294,42 @@ async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)
     return created_order
 
 @app.websocket("/ws/{store_id}")
-async def websocket_endpoint(websocket: WebSocket, store_id: int):
-    store_id_int = int(store_id)
-    print(f"🔌 [WebSocket] 연결 요청: Store {store_id_int}", flush=True)
-    await manager.connect(websocket, store_id_int)
-    
+async def websocket_endpoint(websocket: WebSocket, store_id: int, token: str = Query(None)):
+    # 1. 토큰이 아예 없는 경우 연결 거부
+    if token is None:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+        
+    # 2. 토큰 해독(Decode) 및 사용자 식별
+    try:
+        payload = jwt.decode(token, auth.SECRET_KEY, algorithms=[auth.ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+    except JWTError:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+        
+    # 3. 데이터베이스에서 사용자 권한 및 소속 매장 확인
+    db = SessionLocal()
+    try:
+        user = crud.get_user_by_email(db, email=email)
+        # 본사/슈퍼관리자가 아니면서, 접속하려는 store_id와 자신의 소속 매장이 다르면 차단!
+        if not user or (user.role not in [models.UserRole.SUPER_ADMIN, models.UserRole.GROUP_ADMIN] and user.store_id != store_id):
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+    finally:
+        db.close()
+
+    # 4. 모든 검증을 통과한 경우에만 연결 수락 (Connection Manager에 등록)
+    await manager.connect(websocket, store_id)
     try:
         while True:
-            await websocket.receive_text()
+            # 클라이언트(주방)가 연결을 끊지 않는 한 대기
+            data = await websocket.receive_text()
     except WebSocketDisconnect:
-        print(f"🔌 [WebSocket] 연결 종료: Store {store_id_int}", flush=True)
-        manager.disconnect(websocket, store_id_int)
+        manager.disconnect(websocket, store_id)
 
 @app.get("/stores/{store_id}/orders", response_model=List[schemas.OrderResponse]) 
 def read_store_orders(store_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_store_user)):
