@@ -345,3 +345,16 @@ class StoreResponse(StoreBase):
     categories: List[CategoryResponse] = [] 
     tables: List[TableResponse] = []
     model_config = ConfigDict(from_attributes=True)
+
+# --- [신규] 본사(HQ) 통합 매출 통계 스키마 ---
+class HQStoreStat(BaseModel):
+    store_id: int
+    store_name: str
+    brand_name: Optional[str] = None # ✨ [추가됨] 브랜드 이름
+    revenue: int
+    order_count: int
+
+class HQSalesStatResponse(BaseModel):
+    total_revenue: int
+    total_order_count: int
+    store_stats: List[HQStoreStat]

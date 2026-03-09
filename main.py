@@ -209,6 +209,7 @@ def read_my_stores(db: Session = Depends(get_db), current_user: models.User = De
 def read_all_users(db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
     if current_user.role == models.UserRole.SUPER_ADMIN:
         return db.query(models.User).all()
+        
     if current_user.role == models.UserRole.BRAND_ADMIN:
         if not current_user.brand_id:
             return []
@@ -216,6 +217,13 @@ def read_all_users(db: Session = Depends(get_db), current_user: models.User = De
             models.User.brand_id == current_user.brand_id,
             models.User.role.in_([models.UserRole.STORE_OWNER, models.UserRole.STAFF])
         ).all()
+        
+    # ✨ [추가된 부분] 점주는 '자기 매장'에 소속된 계정(본인 및 직원)만 볼 수 있도록 허용!
+    if current_user.role == models.UserRole.STORE_OWNER:
+        if not current_user.store_id:
+            return []
+        return db.query(models.User).filter(models.User.store_id == current_user.store_id).all()
+        
     raise HTTPException(status_code=403, detail="조회 권한이 없습니다.")
 
 @app.post("/admin/users/", response_model=schemas.UserResponse)
@@ -229,11 +237,21 @@ def create_user_by_admin(user: schemas.UserCreate, db: Session = Depends(get_db)
 
 @app.delete("/admin/users/{user_id}")
 def delete_user_by_admin(user_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
-    if current_user.role != models.UserRole.SUPER_ADMIN:
-        raise HTTPException(status_code=403, detail="슈퍼 관리자만 삭제할 수 있습니다.")
-    user = db.query(models.User).filter(models.User.id == user_id).first()
-    if not user: raise HTTPException(status_code=404, detail="User not found")
-    db.delete(user)
+    user_to_delete = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user_to_delete: 
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # ✨ [수정된 부분] 직급별 맞춤형 삭제 권한 검증
+    if current_user.role == models.UserRole.SUPER_ADMIN:
+        pass # 슈퍼 관리자는 모두 삭제 가능
+    elif current_user.role == models.UserRole.BRAND_ADMIN and user_to_delete.brand_id == current_user.brand_id:
+        pass # 브랜드 관리자는 자기 브랜드 계정 삭제 가능
+    elif current_user.role == models.UserRole.STORE_OWNER and user_to_delete.store_id == current_user.store_id and user_to_delete.role == models.UserRole.STAFF:
+        pass # 점주는 자기 매장의 '직원'만 삭제 가능
+    else:
+        raise HTTPException(status_code=403, detail="삭제 권한이 없거나 다른 매장의 계정입니다.")
+
+    db.delete(user_to_delete)
     db.commit()
     return {"message": "User deleted"}
 
@@ -304,6 +322,48 @@ def get_table_by_token(qr_token: str, db: Session = Depends(get_db)):
     return {"store_id": table.store_id, "table_id": table.id, "label": table.name}
 
 # =========================================================
+# 🪑 테이블 수정 및 삭제 API 추가
+# =========================================================
+
+# 1. 테이블 이름 수정 API
+@app.patch("/tables/{table_id}", response_model=schemas.TableResponse)
+def update_table(
+    table_id: int,
+    table_update: schemas.TableUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user)
+):
+    table = db.query(models.Table).filter(models.Table.id == table_id).first()
+    if not table:
+        raise HTTPException(status_code=404, detail="테이블을 찾을 수 없습니다.")
+    
+    # 내 매장의 테이블이 맞는지 권한 검증
+    verify_store_permission(db, current_user, table.store_id)
+
+    table.name = table_update.name
+    db.commit()
+    db.refresh(table)
+    return table
+
+# 2. 테이블 삭제 API
+@app.delete("/tables/{table_id}")
+def delete_table(
+    table_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user)
+):
+    table = db.query(models.Table).filter(models.Table.id == table_id).first()
+    if not table:
+        raise HTTPException(status_code=404, detail="테이블을 찾을 수 없습니다.")
+    
+    # 내 매장의 테이블이 맞는지 권한 검증
+    verify_store_permission(db, current_user, table.store_id)
+
+    db.delete(table)
+    db.commit()
+    return {"message": "테이블이 완전히 삭제되었습니다."}
+
+# =========================================================
 # 🔥 [주문 시스템 및 WebSocket]
 # =========================================================
 @app.post("/orders/", response_model=schemas.OrderResponse)
@@ -340,10 +400,33 @@ async def websocket_endpoint(websocket: WebSocket, store_id: int, token: str = Q
     db = SessionLocal()
     try:
         user = crud.get_user_by_email(db, email=email)
-        # 본사/슈퍼관리자가 아니면서, 접속하려는 store_id와 자신의 소속 매장이 다르면 차단!
-        if not user or (user.role not in [models.UserRole.SUPER_ADMIN, models.UserRole.GROUP_ADMIN] and user.store_id != store_id):
+        if not user:
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return
+        
+        # ✨ 완벽한 통합 권한 검증 (API와 동일한 기준 적용)
+        has_permission = False
+        
+        # 1. 슈퍼 관리자 (프리패스)
+        if user.role == models.UserRole.SUPER_ADMIN:
+            has_permission = True
+            
+        # 2. 브랜드 관리자 (내 브랜드 매장인지 확인)
+        elif user.role == models.UserRole.BRAND_ADMIN:
+            store = db.query(models.Store).filter(models.Store.id == store_id).first()
+            if store and store.brand_id == user.brand_id:
+                has_permission = True
+                
+        # 3. 점주 및 직원 (내 소속 매장이 맞는지 철저히 확인)
+        elif user.role in [models.UserRole.STORE_OWNER, models.UserRole.STAFF]:
+            if user.store_id == store_id:
+                has_permission = True
+                
+        # 권한이 없다면 웹소켓 연결 차단
+        if not has_permission:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+            
     finally:
         db.close()
 
@@ -363,8 +446,9 @@ def read_store_orders(
     verify_store_permission(db, current_user, store_id)
     return db.query(models.Order).filter(
         models.Order.store_id == store_id,
-        models.Order.payment_status == "PAID"
-    ).order_by(models.Order.id.desc()).all()
+        models.Order.payment_status == "PAID",
+        models.Order.is_completed == False  # ✨ [핵심] 조리 완료 안 된 주문만!
+    ).order_by(models.Order.id.asc()).all() # ✨ [핵심] 먼저 들어온 주문부터 처리하도록 오름차순 정렬!
 
 @app.patch("/orders/{order_id}/complete")
 def complete_order(
@@ -648,21 +732,16 @@ def distribute_menu(
                 
                 # ✨ [핵심 2] 방어 로직 분기점
                 if source_og.id in og_mapping:
-                    # 케이스 A: 본사에서 여러 메뉴가 똑같은 옵션그룹을 '공유'하고 있는 경우 
-                    # -> 가맹점에서도 아까 만들어둔 그룹을 그대로 꺼내어 공유시킴
                     target_og = og_mapping[source_og.id]
                 else:
-                    # 케이스 B: 처음 만나는 옵션 그룹일 때
-                    # -> 타겟 매장 전체를 뒤지는게 아니라, "이 타겟 메뉴"에 이미 예전부터 달려있던 동명의 옵션 그룹이 있는지 우선 확인 (업데이트 목적)
-                    existing_link_for_menu = db.query(models.MenuOptionLink).join(models.OptionGroup).filter(
-                        models.MenuOptionLink.menu_id == target_menu.id,
+                    # 💡 [수정됨] 타겟 매장에 이미 같은 이름의 옵션 그룹이 존재하는지 매장 전체를 먼저 검색합니다!
+                    target_og = db.query(models.OptionGroup).filter(
+                        models.OptionGroup.store_id == store_id,
                         models.OptionGroup.name == source_og.name
                     ).first()
                     
-                    if existing_link_for_menu:
-                        target_og = existing_link_for_menu.option_group
-                    else:
-                        # 타겟 메뉴에 달려있던 적도 없다면, 이름이 겹치든 말든 무조건 독립적인 새 옵션 그룹을 생성 (짬뽕 vs 고기짬뽕 충돌 방지!)
+                    if not target_og:
+                        # 💡 매장 전체를 뒤져도 없을 때만 순수하게 새로 생성합니다.
                         target_og = models.OptionGroup(
                             store_id=store_id, name=source_og.name, 
                             is_single_select=source_og.is_single_select,
@@ -825,6 +904,49 @@ def update_option(
     db.refresh(opt)
     return opt
 
+# =========================================================
+# 🗑️ 카테고리 및 옵션 그룹 삭제 API 추가
+# =========================================================
+
+@app.delete("/categories/{category_id}")
+def delete_category(
+    category_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user)
+):
+    category = db.query(models.Category).filter(models.Category.id == category_id).first()
+    if not category:
+        raise HTTPException(status_code=404, detail="카테고리를 찾을 수 없습니다.")
+    
+    verify_store_permission(db, current_user, category.store_id)
+    
+    # 카테고리 삭제 시 속해있는 메뉴도 깔끔하게 연쇄 삭제
+    db.query(models.Menu).filter(models.Menu.category_id == category_id).delete()
+    
+    db.delete(category)
+    db.commit()
+    return {"message": "카테고리와 하위 메뉴가 삭제되었습니다."}
+
+@app.delete("/option-groups/{group_id}")
+def delete_option_group(
+    group_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user)
+):
+    group = db.query(models.OptionGroup).filter(models.OptionGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="옵션 그룹을 찾을 수 없습니다.")
+    
+    verify_store_permission(db, current_user, group.store_id)
+    
+    # 하위 세부 옵션들 및 메뉴와의 연결 고리 먼저 삭제
+    db.query(models.Option).filter(models.Option.group_id == group_id).delete()
+    db.query(models.MenuOptionLink).filter(models.MenuOptionLink.option_group_id == group_id).delete()
+    
+    db.delete(group)
+    db.commit()
+    return {"message": "옵션 그룹이 완전히 삭제되었습니다."}
+
 # --- 🗑️ 개별 옵션 삭제 ---
 @app.delete("/options/{option_id}")
 def delete_option(
@@ -952,3 +1074,137 @@ def create_standalone_option_group(
     db.commit()
     db.refresh(db_group)
     return db_group
+
+# =========================================================
+# 📈 프랜차이즈 본사: 통합 매출 대시보드 API
+# =========================================================
+@app.get("/hq/stats", response_model=schemas.HQSalesStatResponse)
+def get_hq_sales_stats(
+    start_date: str,
+    end_date: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user)
+):
+    # 1. 본사 권한 확인
+    if current_user.role not in [models.UserRole.SUPER_ADMIN, models.UserRole.BRAND_ADMIN, models.UserRole.GROUP_ADMIN]:
+        raise HTTPException(status_code=403, detail="본사 관리자만 접근할 수 있습니다.")
+
+    # 2. 내 권한으로 볼 수 있는 가맹점 목록 가져오기
+    query = db.query(models.Store)
+    if current_user.role == models.UserRole.BRAND_ADMIN:
+        query = query.filter(models.Store.brand_id == current_user.brand_id)
+    elif current_user.role == models.UserRole.GROUP_ADMIN:
+        query = query.filter(models.Store.group_id == current_user.group_id)
+    stores = query.all()
+    store_ids = [s.id for s in stores]
+
+    if not store_ids:
+        return {"total_revenue": 0, "total_order_count": 0, "store_stats": []}
+
+    # 3. 날짜 범위에 해당하는 결제 완료(PAID) 주문 모두 가져오기
+    start_dt = f"{start_date} 00:00:00"
+    end_dt = f"{end_date} 23:59:59"
+
+    orders = db.query(models.Order).filter(
+        models.Order.store_id.in_(store_ids),
+        models.Order.payment_status == "PAID",
+        models.Order.created_at >= start_dt,
+        models.Order.created_at <= end_dt
+    ).all()
+
+    total_rev = sum(o.total_price for o in orders)
+    total_cnt = len(orders)
+
+    # 4. 매장별로 매출과 건수 집계 (계산기)
+    # ✨ 매장의 brand 정보가 있으면 이름을, 없으면 '독립 매장'으로 기록합니다.
+    store_data = {s.id: {"name": s.name, "brand_name": s.brand.name if s.brand else "독립 매장", "rev": 0, "cnt": 0} for s in stores}
+    for o in orders:
+        if o.store_id in store_data:
+            store_data[o.store_id]["rev"] += o.total_price
+            store_data[o.store_id]["cnt"] += 1
+
+    # 5. 보기 좋게 리스트로 만들고 매출액 기준 내림차순(1등부터) 정렬
+    store_stats = []
+    for sid, data in store_data.items():
+        store_stats.append({
+            "store_id": sid,
+            "store_name": data["name"],
+            "brand_name": data["brand_name"], # ✨ 프론트엔드로 전달
+            "revenue": data["rev"],
+            "order_count": data["cnt"]
+        })
+    store_stats.sort(key=lambda x: x["revenue"], reverse=True)
+
+    return {
+        "total_revenue": total_rev,
+        "total_order_count": total_cnt,
+        "store_stats": store_stats
+    }
+
+# =========================================================
+# 💰 점주용: 개별 매장 매출 통계 API
+# =========================================================
+@app.get("/stores/{store_id}/stats", response_model=schemas.SalesStat)
+def get_store_stats(
+    store_id: int,
+    start_date: str,
+    end_date: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user)
+):
+    # 1. 권한 검증 (내 매장이 맞는지 확인)
+    verify_store_permission(db, current_user, store_id)
+
+    # 2. 날짜 범위 지정 (00시 00분부터 23시 59분까지)
+    start_dt = f"{start_date} 00:00:00"
+    end_dt = f"{end_date} 23:59:59"
+
+    # 3. 해당 기간에 결제 완료(PAID)된 모든 주문 가져오기
+    orders = db.query(models.Order).filter(
+        models.Order.store_id == store_id,
+        models.Order.payment_status == "PAID",
+        models.Order.created_at >= start_dt,
+        models.Order.created_at <= end_dt
+    ).all()
+
+    total_revenue = sum(o.total_price for o in orders)
+    order_count = len(orders)
+
+    menu_data = {}
+    hourly_data = {i: 0 for i in range(24)} # 0시부터 23시까지 기본값 0 세팅
+
+    # 4. 주문 내역을 돌면서 메뉴별 / 시간대별 데이터 집계
+    for order in orders:
+        # 시간대 집계 (예: "2026-03-09 18:24:00" -> 18 추출)
+        try:
+            order_hour = int(str(order.created_at).split(" ")[1].split(":")[0])
+            hourly_data[order_hour] += order.total_price
+        except:
+            pass
+
+        # 메뉴별 집계
+        for item in order.items:
+            if item.menu_name not in menu_data:
+                menu_data[item.menu_name] = {"count": 0, "revenue": 0}
+            menu_data[item.menu_name]["count"] += item.quantity
+            menu_data[item.menu_name]["revenue"] += (item.price * item.quantity)
+
+    # 5. 프론트엔드가 요구하는 형식(리스트)으로 변환 및 정렬
+    menu_stats = [
+        {"name": name, "count": data["count"], "revenue": data["revenue"]}
+        for name, data in menu_data.items()
+    ]
+    # 인기 메뉴 순위 (매출액 기준 내림차순 정렬)
+    menu_stats.sort(key=lambda x: x["revenue"], reverse=True)
+
+    hourly_stats = [
+        {"hour": hour, "sales": sales}
+        for hour, sales in hourly_data.items()
+    ]
+
+    return {
+        "total_revenue": total_revenue,
+        "order_count": order_count,
+        "menu_stats": menu_stats,
+        "hourly_stats": hourly_stats
+    }
