@@ -192,10 +192,14 @@ def read_store(store_id: int, db: Session = Depends(get_db)):
 
 @app.get("/groups/my/stores", response_model=List[schemas.StoreResponse])
 def read_my_stores(db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
-    if current_user.role == models.UserRole.SUPER_ADMIN: return db.query(models.Store).all()
-    if current_user.role == models.UserRole.BRAND_ADMIN: return db.query(models.Store).filter(models.Store.brand_id == current_user.brand_id).all() if current_user.brand_id else []
-    if current_user.role == models.UserRole.GROUP_ADMIN: return db.query(models.Store).filter(models.Store.group_id == current_user.group_id).all() if current_user.group_id else []
-    if current_user.role == models.UserRole.STORE_OWNER: return db.query(models.Store).filter(models.Store.id == current_user.store_id).all() if current_user.store_id else []
+    if current_user.role == models.UserRole.SUPER_ADMIN: 
+        return db.query(models.Store).order_by(models.Store.id).all()
+    if current_user.role == models.UserRole.BRAND_ADMIN: 
+        return db.query(models.Store).filter(models.Store.brand_id == current_user.brand_id).order_by(models.Store.id).all() if current_user.brand_id else []
+    if current_user.role == models.UserRole.GROUP_ADMIN: 
+        return db.query(models.Store).filter(models.Store.group_id == current_user.group_id).order_by(models.Store.id).all() if current_user.group_id else []
+    if current_user.role == models.UserRole.STORE_OWNER: 
+        return db.query(models.Store).filter(models.Store.id == current_user.store_id).order_by(models.Store.id).all() if current_user.store_id else []
     return []
 
 # =========================================================
