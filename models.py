@@ -68,6 +68,9 @@ class Store(Base):
     call_options = relationship("CallOption", back_populates="store", cascade="all, delete-orphan")
     # ✨ [추가] 지점별 기본 가격 할증 (예: 강남점은 500)
     price_markup = Column(Integer, default=0)
+    # ✨ [추가] 가맹점 로열티 산출 방식 및 값
+    royalty_type = Column(String, default="PERCENTAGE") # "PERCENTAGE" 또는 "FIXED"
+    royalty_amount = Column(Float, default=0.0) # 퍼센트 비율(%) 또는 고정금액(원)
 
 # ⚠️ 2그룹: 예외 (관리자 때문에 nullable=True 유지)
 class User(Base):

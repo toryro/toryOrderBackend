@@ -1116,8 +1116,18 @@ def get_hq_sales_stats(
     total_cnt = len(orders)
 
     # 4. 매장별로 매출과 건수 집계 (계산기)
-    # ✨ 매장의 brand 정보가 있으면 이름을, 없으면 '독립 매장'으로 기록합니다.
-    store_data = {s.id: {"name": s.name, "brand_name": s.brand.name if s.brand else "독립 매장", "rev": 0, "cnt": 0} for s in stores}
+    # ✨ 매장 정보에 royalty_type과 royalty_amount를 함께 담아둡니다.
+    store_data = {
+        s.id: {
+            "name": s.name, 
+            "brand_name": s.brand.name if s.brand else "독립 매장", 
+            "rev": 0, 
+            "cnt": 0,
+            "r_type": s.royalty_type or "PERCENTAGE",
+            "r_amount": s.royalty_amount or 0.0
+        } for s in stores
+    }
+    
     for o in orders:
         if o.store_id in store_data:
             store_data[o.store_id]["rev"] += o.total_price
@@ -1125,19 +1135,31 @@ def get_hq_sales_stats(
 
     # 5. 보기 좋게 리스트로 만들고 매출액 기준 내림차순(1등부터) 정렬
     store_stats = []
+    total_royalty = 0 # ✨ 총 로열티 합계 변수
+    
     for sid, data in store_data.items():
+        # ✨ 로열티 계산 로직 (비율 vs 고정금액)
+        if data["r_type"] == "PERCENTAGE":
+            calc_royalty = int(data["rev"] * (data["r_amount"] / 100))
+        else:
+            calc_royalty = int(data["r_amount"]) # 고정 금액일 경우 매출과 무관하게 해당 금액 적용
+            
+        total_royalty += calc_royalty
+        
         store_stats.append({
             "store_id": sid,
             "store_name": data["name"],
-            "brand_name": data["brand_name"], # ✨ 프론트엔드로 전달
+            "brand_name": data["brand_name"],
             "revenue": data["rev"],
-            "order_count": data["cnt"]
+            "order_count": data["cnt"],
+            "royalty_fee": calc_royalty # ✨ 계산된 금액 포장
         })
     store_stats.sort(key=lambda x: x["revenue"], reverse=True)
 
     return {
         "total_revenue": total_rev,
         "total_order_count": total_cnt,
+        "total_royalty_fee": total_royalty, # ✨ 프론트엔드로 전달
         "store_stats": store_stats
     }
 

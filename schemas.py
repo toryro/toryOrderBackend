@@ -143,6 +143,8 @@ class StoreBase(BaseModel):
     open_time: Optional[str] = None
     close_time: Optional[str] = None
     price_markup: int = 0
+    royalty_type: str = "PERCENTAGE" # ✨ 추가됨
+    royalty_amount: float = 0.0      # ✨ 추가됨
 
 class StoreCreate(StoreBase):
     group_id: Optional[int] = None 
@@ -163,6 +165,8 @@ class StoreUpdate(BaseModel):
     is_open: Optional[bool] = None 
     brand_id: Optional[int] = None # 추가됨
     price_markup: Optional[int] = None
+    royalty_type: Optional[str] = None     # ✨ 추가됨
+    royalty_amount: Optional[float] = None # ✨ 추가됨
 
 class OrderBase(BaseModel):
     store_id: int
@@ -353,8 +357,10 @@ class HQStoreStat(BaseModel):
     brand_name: Optional[str] = None # ✨ [추가됨] 브랜드 이름
     revenue: int
     order_count: int
+    royalty_fee: int # ✨ 추가됨 (계산 완료된 로열티 금액)
 
 class HQSalesStatResponse(BaseModel):
     total_revenue: int
     total_order_count: int
+    total_royalty_fee: int # ✨ 추가됨 (전체 지점 로열티 합계)
     store_stats: List[HQStoreStat]
