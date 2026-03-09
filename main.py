@@ -1115,16 +1115,15 @@ def get_hq_sales_stats(
     total_rev = sum(o.total_price for o in orders)
     total_cnt = len(orders)
 
-    # 4. 매장별로 매출과 건수 집계 (계산기)
-    # ✨ 매장 정보에 royalty_type과 royalty_amount를 함께 담아둡니다.
+    # 4. 매장별로 매출과 건수 집계
     store_data = {
         s.id: {
             "name": s.name, 
             "brand_name": s.brand.name if s.brand else "독립 매장", 
-            "rev": 0, 
-            "cnt": 0,
-            "r_type": s.royalty_type or "PERCENTAGE",
-            "r_amount": s.royalty_amount or 0.0
+            "region": s.region or "미지정", # ✨ 지역 정보
+            "is_direct_manage": s.is_direct_manage, # ✨ 직영/가맹 정보
+            "rev": 0, "cnt": 0,
+            "r_type": s.royalty_type or "PERCENTAGE", "r_amount": s.royalty_amount or 0.0
         } for s in stores
     }
     
@@ -1133,16 +1132,15 @@ def get_hq_sales_stats(
             store_data[o.store_id]["rev"] += o.total_price
             store_data[o.store_id]["cnt"] += 1
 
-    # 5. 보기 좋게 리스트로 만들고 매출액 기준 내림차순(1등부터) 정렬
+    # 5. 리스트로 만들고 정렬
     store_stats = []
-    total_royalty = 0 # ✨ 총 로열티 합계 변수
+    total_royalty = 0 
     
     for sid, data in store_data.items():
-        # ✨ 로열티 계산 로직 (비율 vs 고정금액)
         if data["r_type"] == "PERCENTAGE":
             calc_royalty = int(data["rev"] * (data["r_amount"] / 100))
         else:
-            calc_royalty = int(data["r_amount"]) # 고정 금액일 경우 매출과 무관하게 해당 금액 적용
+            calc_royalty = int(data["r_amount"]) 
             
         total_royalty += calc_royalty
         
@@ -1150,9 +1148,11 @@ def get_hq_sales_stats(
             "store_id": sid,
             "store_name": data["name"],
             "brand_name": data["brand_name"],
+            "region": data["region"], # ✨ 포장
+            "is_direct_manage": data["is_direct_manage"], # ✨ 포장
             "revenue": data["rev"],
             "order_count": data["cnt"],
-            "royalty_fee": calc_royalty # ✨ 계산된 금액 포장
+            "royalty_fee": calc_royalty
         })
     store_stats.sort(key=lambda x: x["revenue"], reverse=True)
 

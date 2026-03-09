@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, Date, Time, Enum as SAEnum
+from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, Date, Time, Float, Enum as SAEnum
 from sqlalchemy.orm import relationship
 from database import Base
 from datetime import datetime
@@ -71,6 +71,8 @@ class Store(Base):
     # ✨ [추가] 가맹점 로열티 산출 방식 및 값
     royalty_type = Column(String, default="PERCENTAGE") # "PERCENTAGE" 또는 "FIXED"
     royalty_amount = Column(Float, default=0.0) # 퍼센트 비율(%) 또는 고정금액(원)
+    # ✨ [추가] 매장 지역 분류
+    region = Column(String, default="미지정")
 
 # ⚠️ 2그룹: 예외 (관리자 때문에 nullable=True 유지)
 class User(Base):

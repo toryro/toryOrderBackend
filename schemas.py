@@ -145,6 +145,7 @@ class StoreBase(BaseModel):
     price_markup: int = 0
     royalty_type: str = "PERCENTAGE" # ✨ 추가됨
     royalty_amount: float = 0.0      # ✨ 추가됨
+    region: Optional[str] = "미지정"
 
 class StoreCreate(StoreBase):
     group_id: Optional[int] = None 
@@ -167,6 +168,8 @@ class StoreUpdate(BaseModel):
     price_markup: Optional[int] = None
     royalty_type: Optional[str] = None     # ✨ 추가됨
     royalty_amount: Optional[float] = None # ✨ 추가됨
+    region: Optional[str] = None
+    is_direct_manage: Optional[bool] = None
 
 class OrderBase(BaseModel):
     store_id: int
@@ -355,6 +358,8 @@ class HQStoreStat(BaseModel):
     store_id: int
     store_name: str
     brand_name: Optional[str] = None # ✨ [추가됨] 브랜드 이름
+    region: str # ✨ 추가됨
+    is_direct_manage: bool # ✨ 추가됨
     revenue: int
     order_count: int
     royalty_fee: int # ✨ 추가됨 (계산 완료된 로열티 금액)

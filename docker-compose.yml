@@ -4,8 +4,8 @@ services:
     image: postgres:15
     container_name: qr_postgres
     environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
+      POSTGRES_USER: tory
+      POSTGRES_PASSWORD: nine78&*
       POSTGRES_DB: qrorder
     ports:
       - "5435:5432"
