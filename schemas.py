@@ -103,6 +103,7 @@ class MenuBase(BaseModel):
     is_hidden: bool = False 
     image_url: Optional[str] = None 
     order_index: int = 0
+    is_price_fixed: bool = False
 
 class CategoryBase(BaseModel):
     name: str
@@ -141,6 +142,7 @@ class StoreBase(BaseModel):
 
     open_time: Optional[str] = None
     close_time: Optional[str] = None
+    price_markup: int = 0
 
 class StoreCreate(StoreBase):
     group_id: Optional[int] = None 
@@ -160,16 +162,7 @@ class StoreUpdate(BaseModel):
     close_time: Optional[str] = None
     is_open: Optional[bool] = None 
     brand_id: Optional[int] = None # 추가됨
-
-class StoreResponse(StoreBase):
-    id: int
-    is_open: bool
-    group_id: Optional[int] = None
-    operating_hours: List[OperatingHourResponse] = [] 
-    holidays: List[HolidayResponse] = [] 
-    categories: List["CategoryResponse"] = []
-    tables: List["TableResponse"] = []
-    model_config = ConfigDict(from_attributes=True)
+    price_markup: Optional[int] = None
 
 class OrderBase(BaseModel):
     store_id: int
@@ -215,6 +208,7 @@ class MenuUpdate(BaseModel):
     image_url: Optional[str] = None
     order_index: Optional[int] = None
     category_id: Optional[int] = None
+    is_price_fixed: Optional[bool] = None
 
 class OptionUpdate(BaseModel):
     name: Optional[str] = None

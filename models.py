@@ -66,6 +66,8 @@ class Store(Base):
     holidays = relationship("Holiday", back_populates="store", cascade="all, delete-orphan")
     staff_calls = relationship("StaffCall", back_populates="store", cascade="all, delete-orphan")
     call_options = relationship("CallOption", back_populates="store", cascade="all, delete-orphan")
+    # ✨ [추가] 지점별 기본 가격 할증 (예: 강남점은 500)
+    price_markup = Column(Integer, default=0)
 
 # ⚠️ 2그룹: 예외 (관리자 때문에 nullable=True 유지)
 class User(Base):
@@ -115,6 +117,8 @@ class Menu(Base):
     
     category = relationship("Category", back_populates="menus")
     menu_option_links = relationship("MenuOptionLink", back_populates="menu", cascade="all, delete-orphan")
+    # ✨ [추가] 본사에서 가격 변경을 금지했는지 여부
+    is_price_fixed = Column(Boolean, default=False)
 
 class OptionGroup(Base):
     __tablename__ = "option_groups"
