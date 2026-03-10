@@ -434,7 +434,7 @@ async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)
                             )
             except json.JSONDecodeError:
                 pass # 파싱 에러 시 그냥 통과
-            
+
     for item in order.items:
         # 교차 검증: 요청된 메뉴가 결제하려는 해당 매장의 메뉴인지 강제 확인
         menu = db.query(models.Menu).filter(
@@ -1268,9 +1268,9 @@ def get_hq_sales_stats(
     }
 
 # =========================================================
-# 💰 점주용: 개별 매장 매출 통계 API
+# 💰 점주용: 개별 매장 매출 통계 API (상세 리포트 분석 적용)
 # =========================================================
-@app.get("/stores/{store_id}/stats", response_model=schemas.SalesStat)
+@app.get("/stores/{store_id}/stats") 
 def get_store_stats(
     store_id: int,
     start_date: str,
@@ -1281,11 +1281,9 @@ def get_store_stats(
     # 1. 권한 검증 (내 매장이 맞는지 확인)
     verify_store_permission(db, current_user, store_id)
 
-    # 2. 날짜 범위 지정 (00시 00분부터 23시 59분까지)
     start_dt = f"{start_date} 00:00:00"
     end_dt = f"{end_date} 23:59:59"
 
-    # 3. 해당 기간에 결제 완료(PAID)된 모든 주문 가져오기
     orders = db.query(models.Order).filter(
         models.Order.store_id == store_id,
         models.Order.payment_status == "PAID",
@@ -1295,44 +1293,64 @@ def get_store_stats(
 
     total_revenue = sum(o.total_price for o in orders)
     order_count = len(orders)
+    # ✨ [신규] 객단가(Average Order Value) 계산
+    average_order_value = int(total_revenue / order_count) if order_count > 0 else 0
 
     menu_data = {}
-    hourly_data = {i: 0 for i in range(24)} # 0시부터 23시까지 기본값 0 세팅
+    hourly_data = {f"{i:02d}": 0 for i in range(24)} # 00시부터 23시까지 기본값 0 
+    daily_data = {}
+    monthly_data = {}
 
-    # 4. 주문 내역을 돌면서 메뉴별 / 시간대별 데이터 집계
+    # 2. 주문 내역을 돌면서 다각도로 데이터 분해 집계
     for order in orders:
-        # 시간대 집계 (예: "2026-03-09 18:24:00" -> 18 추출)
+        created_at_str = str(order.created_at)
         try:
-            order_hour = int(str(order.created_at).split(" ")[1].split(":")[0])
-            hourly_data[order_hour] += order.total_price
+            date_part = created_at_str.split(" ")[0] # "YYYY-MM-DD"
+            time_part = created_at_str.split(" ")[1] # "HH:MM:SS"
+            order_hour = time_part.split(":")[0]     # "HH"
+            order_month = date_part[:7]              # "YYYY-MM"
         except:
-            pass
+            continue
 
-        # 메뉴별 집계
+        # ✨ [시간대별]
+        if order_hour in hourly_data:
+            hourly_data[order_hour] += order.total_price
+
+        # ✨ [일별]
+        if date_part not in daily_data:
+            daily_data[date_part] = {"sales": 0, "count": 0}
+        daily_data[date_part]["sales"] += order.total_price
+        daily_data[date_part]["count"] += 1
+
+        # ✨ [월별]
+        if order_month not in monthly_data:
+            monthly_data[order_month] = {"sales": 0, "count": 0}
+        monthly_data[order_month]["sales"] += order.total_price
+        monthly_data[order_month]["count"] += 1
+
+        # ✨ [메뉴별]
         for item in order.items:
             if item.menu_name not in menu_data:
                 menu_data[item.menu_name] = {"count": 0, "revenue": 0}
             menu_data[item.menu_name]["count"] += item.quantity
             menu_data[item.menu_name]["revenue"] += (item.price * item.quantity)
 
-    # 5. 프론트엔드가 요구하는 형식(리스트)으로 변환 및 정렬
-    menu_stats = [
-        {"name": name, "count": data["count"], "revenue": data["revenue"]}
-        for name, data in menu_data.items()
-    ]
-    # 인기 메뉴 순위 (매출액 기준 내림차순 정렬)
-    menu_stats.sort(key=lambda x: x["revenue"], reverse=True)
+    # 3. 프론트엔드가 요구하는 형식(리스트)으로 변환 및 정렬
+    menu_stats = [{"name": name, "count": data["count"], "revenue": data["revenue"]} for name, data in menu_data.items()]
+    menu_stats.sort(key=lambda x: x["revenue"], reverse=True) # 매출 높은순
 
-    hourly_stats = [
-        {"hour": hour, "sales": sales}
-        for hour, sales in hourly_data.items()
-    ]
+    hourly_stats = [{"hour": hour, "sales": sales} for hour, sales in hourly_data.items()]
+    daily_stats = [{"date": k, "sales": v["sales"], "count": v["count"]} for k, v in sorted(daily_data.items(), reverse=True)] # 최신 날짜순
+    monthly_stats = [{"month": k, "sales": v["sales"], "count": v["count"]} for k, v in sorted(monthly_data.items(), reverse=True)] # 최신 달 순
 
     return {
         "total_revenue": total_revenue,
         "order_count": order_count,
+        "average_order_value": average_order_value, # 객단가
         "menu_stats": menu_stats,
-        "hourly_stats": hourly_stats
+        "hourly_stats": hourly_stats,
+        "daily_stats": daily_stats,
+        "monthly_stats": monthly_stats
     }
 
 # =========================================================
