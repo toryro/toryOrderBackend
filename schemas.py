@@ -369,3 +369,10 @@ class HQSalesStatResponse(BaseModel):
     total_order_count: int
     total_royalty_fee: int # ✨ 추가됨 (전체 지점 로열티 합계)
     store_stats: List[HQStoreStat]
+
+class NoticeCreate(BaseModel):
+    title: str
+    content: str
+    target_type: str
+    target_brand_id: Optional[int] = None
+    target_store_id: Optional[int] = None

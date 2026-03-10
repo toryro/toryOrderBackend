@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from jose import JWTError, jwt
 from dotenv import load_dotenv
+from sqlalchemy import or_, and_
 
 # 환경변수 로드 (최상단 필수)
 load_dotenv()
@@ -1230,3 +1231,104 @@ def get_store_stats(
         "menu_stats": menu_stats,
         "hourly_stats": hourly_stats
     }
+
+# =========================================================
+# 📢 고도화된 타겟팅 공지사항 API
+# =========================================================
+
+# 1. 공지사항 발송 API (타겟 지정)
+@app.post("/admin/notices")
+def create_notice(notice: schemas.NoticeCreate, db: Session = Depends(get_db)):
+    new_notice = models.Notice(
+        title=notice.title, content=notice.content, 
+        target_type=notice.target_type, target_brand_id=notice.target_brand_id, target_store_id=notice.target_store_id
+    )
+    db.add(new_notice)
+    db.commit()
+    return {"message": "발송 완료"}
+
+# 2. 안 읽은 공지사항 불러오기 API (팝업용)
+@app.get("/notices/unread")
+def get_unread_notices(db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
+    # 1단계: 현재 유저가 이미 "읽음(확인)" 처리한 공지사항 ID 목록
+    read_notice_ids = [r.notice_id for r in db.query(models.NoticeRead).filter(models.NoticeRead.user_id == current_user.id).all()]
+
+    # 2단계: 안 읽은 공지만 필터링
+    filters = [models.Notice.is_active == True]
+    if read_notice_ids:
+        filters.append(models.Notice.id.notin_(read_notice_ids))
+
+    # 3단계: 유저 권한/소속에 따른 타겟팅 필터링
+    target_filters = [models.Notice.target_type == "ALL"]
+    
+    if current_user.brand_id: 
+        target_filters.append(and_(models.Notice.target_type == "BRAND", models.Notice.target_brand_id == current_user.brand_id))
+    
+    if current_user.store_id: 
+        # 특정 매장 타겟팅 포함
+        target_filters.append(and_(models.Notice.target_type == "STORE", models.Notice.target_store_id == current_user.store_id))
+        
+        # ✨ [핵심 수정] 내 매장이 속한 '브랜드'의 공지도 포함하기!
+        user_store = db.query(models.Store).filter(models.Store.id == current_user.store_id).first()
+        if user_store and user_store.brand_id:
+            target_filters.append(and_(models.Notice.target_type == "BRAND", models.Notice.target_brand_id == user_store.brand_id))
+
+    # 4단계: 교집합 & 합집합 쿼리 실행
+    notices = db.query(models.Notice).filter(and_(*filters), or_(*target_filters)).order_by(models.Notice.created_at.asc()).all()
+    return notices
+
+# 3. 공지사항 읽음 처리 API
+@app.post("/notices/{notice_id}/read")
+def mark_notice_read(notice_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
+    read_entry = models.NoticeRead(user_id=current_user.id, notice_id=notice_id)
+    db.add(read_entry)
+    db.commit()
+    return {"message": "읽음 처리 완료"}
+
+
+# 4. 공지사항 발송 내역 조회 API (본사 게시판용)
+@app.get("/admin/notices/history")
+def get_notice_history(db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
+    if current_user.role == "SUPER_ADMIN":
+        return db.query(models.Notice).order_by(models.Notice.created_at.desc()).all()
+    elif current_user.role == "BRAND_ADMIN":
+        return db.query(models.Notice).filter(
+            or_(
+                models.Notice.target_brand_id == current_user.brand_id,
+                models.Notice.target_type == "BRAND" 
+            )
+        ).order_by(models.Notice.created_at.desc()).all()
+    return []
+
+
+# 5. [점주/직원용] 내 수신 공지함 전체 목록 API (읽음 여부 포함)
+@app.get("/notices/my")
+def get_my_notices(db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
+    target_filters = [models.Notice.target_type == "ALL"]
+    
+    if current_user.brand_id:
+        target_filters.append(and_(models.Notice.target_type == "BRAND", models.Notice.target_brand_id == current_user.brand_id))
+    
+    if current_user.store_id:
+        # 특정 매장 타겟팅 포함
+        target_filters.append(and_(models.Notice.target_type == "STORE", models.Notice.target_store_id == current_user.store_id))
+        
+        # ✨ [핵심 수정] 내 매장이 속한 '브랜드'의 공지도 포함하기!
+        user_store = db.query(models.Store).filter(models.Store.id == current_user.store_id).first()
+        if user_store and user_store.brand_id:
+            target_filters.append(and_(models.Notice.target_type == "BRAND", models.Notice.target_brand_id == user_store.brand_id))
+    
+    notices = db.query(models.Notice).filter(or_(*target_filters)).order_by(models.Notice.created_at.desc()).all()
+    
+    read_notice_ids = {r.notice_id for r in db.query(models.NoticeRead).filter(models.NoticeRead.user_id == current_user.id).all()}
+    
+    result = []
+    for n in notices:
+        result.append({
+            "id": n.id,
+            "title": n.title,
+            "content": n.content,
+            "created_at": n.created_at,
+            "is_read": n.id in read_notice_ids
+        })
+    return result

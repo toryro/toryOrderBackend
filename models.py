@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, Date, Time, Float, Enum as SAEnum
+from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, Date, Time, Float, DateTime, Enum as SAEnum
 from sqlalchemy.orm import relationship
 from database import Base
 from datetime import datetime
@@ -240,3 +240,21 @@ class StaffCall(Base):
     created_at = Column(String, default=lambda: str(datetime.now()))
     store = relationship("Store", back_populates="staff_calls")
     table = relationship("Table", back_populates="staff_calls")
+
+class Notice(Base):
+    __tablename__ = "notices"
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, nullable=False)
+    content = Column(String, nullable=False)
+    target_type = Column(String, nullable=False) 
+    target_brand_id = Column(Integer, nullable=True)
+    target_store_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    is_active = Column(Boolean, default=True)
+
+class NoticeRead(Base):
+    __tablename__ = "notice_reads"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    notice_id = Column(Integer, ForeignKey("notices.id"))
+    read_at = Column(DateTime, default=datetime.utcnow)
