@@ -185,6 +185,8 @@ class OperatingHour(Base):
     open_time = Column(String, nullable=True)
     close_time = Column(String, nullable=True)
     is_closed = Column(Boolean, default=False)
+    # ✨ [핵심] 여러 개의 브레이크 타임을 문자열(JSON) 형태로 한 번에 저장합니다.
+    break_time_list = Column(String, default="[]")
     store = relationship("Store", back_populates="operating_hours")
 
 class Holiday(Base):

@@ -10,6 +10,7 @@ import uuid
 import os
 import requests 
 from pydantic import BaseModel
+from datetime import datetime
 
 from jose import JWTError, jwt
 from dotenv import load_dotenv
@@ -405,6 +406,35 @@ def delete_table(
 # =========================================================
 @app.post("/orders/", response_model=schemas.OrderResponse)
 async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)):
+    # 🛡️ [다중 브레이크 타임 철벽 방어 로직]
+    now = datetime.now()
+    current_time_str = now.strftime("%H:%M") # 예: "15:30"
+    current_weekday = now.weekday()          # 0:월 ~ 6:일
+
+    # 오늘 요일에 해당하는 영업시간 가져오기
+    today_hours = db.query(models.OperatingHour).filter(
+        models.OperatingHour.store_id == order.store_id,
+        models.OperatingHour.day_of_week == current_weekday
+    ).first()
+
+    if today_hours:
+        if today_hours.is_closed:
+            raise HTTPException(status_code=400, detail="오늘은 매장 휴무일입니다.")
+        
+        # ✨ 저장된 휴게시간 리스트를 열어서 하나씩 현재 시간과 비교!
+        if today_hours.break_time_list and today_hours.break_time_list != "[]":
+            try:
+                break_times = json.loads(today_hours.break_time_list)
+                for bt in break_times:
+                    if bt.get("start") and bt.get("end"):
+                        if bt["start"] <= current_time_str <= bt["end"]:
+                            raise HTTPException(
+                                status_code=400, 
+                                detail=f"현재 브레이크 타임({bt['start']} ~ {bt['end']}) 중이므로 주문할 수 없습니다. ☕"
+                            )
+            except json.JSONDecodeError:
+                pass # 파싱 에러 시 그냥 통과
+            
     for item in order.items:
         # 교차 검증: 요청된 메뉴가 결제하려는 해당 매장의 메뉴인지 강제 확인
         menu = db.query(models.Menu).filter(
@@ -1328,7 +1358,7 @@ def create_notice(notice: schemas.NoticeCreate, db: Session = Depends(get_db)):
         db=db, user_id=current_user.id, action="SEND_NOTICE", target_type="NOTICE", target_id=new_notice.id,
         details=f"[{target_str}]에 공지 발송: '{notice.title}'"
     )
-    
+
     return {"message": "발송 완료"}
 
 # 2. 안 읽은 공지사항 불러오기 API (팝업용)

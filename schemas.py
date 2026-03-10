@@ -59,6 +59,7 @@ class OperatingHourBase(BaseModel):
     open_time: Optional[str] = None
     close_time: Optional[str] = None
     is_closed: bool = False
+    break_time_list: Optional[str] = "[]"  # ✨ 여러 개의 휴게시간을 받을 준비 완료
 
 class OperatingHourUpdate(OperatingHourBase):
     pass
