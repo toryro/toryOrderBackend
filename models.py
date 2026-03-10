@@ -258,3 +258,17 @@ class NoticeRead(Base):
     user_id = Column(Integer, ForeignKey("users.id"))
     notice_id = Column(Integer, ForeignKey("notices.id"))
     read_at = Column(DateTime, default=datetime.utcnow)
+
+# ✨ [신규 추가] 시스템 감사 로그 (블랙박스)
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    action = Column(String, nullable=False)
+    target_type = Column(String, nullable=False)
+    target_id = Column(Integer, nullable=True)
+    details = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # 누가 했는지 이름을 쉽게 가져오기 위한 연결고리
+    user = relationship("User")

@@ -123,6 +123,13 @@ def create_brand(brand: schemas.BrandCreate, db: Session = Depends(get_db), curr
     db.add(db_brand)
     db.commit()
     db.refresh(db_brand)
+
+    # ✨ [CCTV 추가] 브랜드 생성 기록
+    create_audit_log(
+        db=db, user_id=current_user.id, action="CREATE_BRAND", target_type="BRAND", target_id=db_brand.id,
+        details=f"신규 브랜드 생성: [{db_brand.name}]"
+    )
+
     return db_brand
 
 @app.get("/brands/", response_model=List[schemas.BrandResponse])
@@ -159,6 +166,13 @@ def create_store(store: schemas.StoreCreate, db: Session = Depends(get_db), curr
         current_user.store_id = new_store.id
         db.add(current_user)
         db.commit()
+
+        # ✨ [CCTV 추가] 매장 생성 기록
+    create_audit_log(
+        db=db, user_id=current_user.id, action="CREATE_STORE", target_type="STORE", target_id=new_store.id,
+        details=f"새 매장 오픈: [{new_store.name}]"
+    )
+
     return new_store
 
 @app.get("/stores/{store_id}", response_model=schemas.StoreResponse)
@@ -234,6 +248,15 @@ def create_user_by_admin(user: schemas.UserCreate, db: Session = Depends(get_db)
     db_user = crud.get_user_by_email(db, email=user.email)
     if db_user:
         raise HTTPException(status_code=400, detail="이미 등록된 이메일입니다.")
+    
+    # ✨ [CCTV 추가] 변수에 담아서 로그를 남기고 리턴!
+    new_user = crud.create_user(db=db, user=user)
+    role_kr = {"SUPER_ADMIN":"슈퍼관리자", "BRAND_ADMIN":"브랜드관리자", "STORE_OWNER":"점주", "STAFF":"직원"}.get(new_user.role, new_user.role)
+    create_audit_log(
+        db=db, user_id=current_user.id, action="CREATE_USER", target_type="USER", target_id=new_user.id,
+        details=f"새 계정 발급: {new_user.name} / {new_user.email} ({role_kr})"
+    )
+
     return crud.create_user(db=db, user=user)
 
 @app.delete("/admin/users/{user_id}")
@@ -251,6 +274,12 @@ def delete_user_by_admin(user_id: int, db: Session = Depends(get_db), current_us
         pass # 점주는 자기 매장의 '직원'만 삭제 가능
     else:
         raise HTTPException(status_code=403, detail="삭제 권한이 없거나 다른 매장의 계정입니다.")
+
+    # ✨ [CCTV 추가] 계정 삭제 기록
+    create_audit_log(
+        db=db, user_id=current_user.id, action="DELETE_USER", target_type="USER", target_id=user_id,
+        details=f"계정 삭제됨: {user_to_delete.name} ({user_to_delete.email})"
+    )
 
     db.delete(user_to_delete)
     db.commit()
@@ -290,6 +319,13 @@ def create_menu_for_category(
     db.add(db_menu)
     db.commit()
     db.refresh(db_menu)
+
+    # ✨ [CCTV 추가] 메뉴 추가 기록
+    create_audit_log(
+        db=db, user_id=current_user.id, action="CREATE_MENU", target_type="MENU", target_id=db_menu.id,
+        details=f"새 메뉴 생성: [{db_menu.name}] (가격: {db_menu.price}원)"
+    )
+
     return db_menu
 
 @app.post("/menus/{menu_id}/option-groups/", response_model=schemas.OptionGroupResponse)
@@ -793,6 +829,13 @@ def distribute_menu(
             
             db.commit()
 
+    # ✨ [CCTV 추가] 일괄 배포 결과 기록
+    category_name = source_category.name if source_category else "알수없는 카테고리"
+    create_audit_log(
+        db=db, user_id=current_user.id, action="DISTRIBUTE_MENU", target_type="CATEGORY", target_id=req.source_category_id,
+        details=f"메뉴 일괄 배포: '{category_name}' 카테고리를 타겟 매장 {len(req.target_store_ids)}곳에 덮어쓰기 완료"
+    )
+
     return {"message": f"총 {len(req.target_store_ids)}개 매장 배포 완료! (신규추가: {success_count}개, 업데이트: {update_count}개)"}
 
 # --- 🏠 매장 기본 정보 수정 ---
@@ -815,6 +858,13 @@ def update_store_info(
         
     db.commit()
     db.refresh(store)
+
+    # ✨ [CCTV 추가] 매장 설정 변경 기록
+    create_audit_log(
+        db=db, user_id=current_user.id, action="UPDATE_STORE", target_type="STORE", target_id=store.id,
+        details=f"매장 정보/정책 수정: [{store.name}]"
+    )
+
     return store
 
 # --- 🍽️ 메뉴 수정 ---
@@ -837,6 +887,23 @@ def update_menu(
             raise HTTPException(status_code=403, detail="본사에서 강제 고정한 메뉴이므로 점주가 임의로 가격을 변경할 수 없습니다.")
 
     update_data = menu_update.dict(exclude_unset=True)
+
+    # ✨ [CCTV 추가] 무엇이 바뀌었는지 꼼꼼하게 추적
+    changes = []
+    if "price" in update_data and menu.price != update_data["price"]:
+        changes.append(f"가격 {menu.price}원 -> {update_data['price']}원")
+    if "name" in update_data and menu.name != update_data["name"]:
+        changes.append(f"이름 '{menu.name}' -> '{update_data['name']}'")
+    if "is_sold_out" in update_data and menu.is_sold_out != update_data["is_sold_out"]:
+        status = "품절" if update_data["is_sold_out"] else "판매중"
+        changes.append(f"상태 -> {status}")
+        
+    if changes:
+        create_audit_log(
+            db=db, user_id=current_user.id, action="UPDATE_MENU", target_type="MENU", target_id=menu.id,
+            details=f"메뉴 수정 [{menu.name}]: " + ", ".join(changes)
+        )
+
     for key, value in update_data.items():
         setattr(menu, key, value)
     
@@ -856,6 +923,12 @@ def delete_menu(
         raise HTTPException(status_code=404, detail="메뉴를 찾을 수 없습니다.")
         
     verify_store_permission(db, current_user, menu.store_id)
+
+    # ✨ [CCTV 추가] 메뉴 삭제 기록
+    create_audit_log(
+        db=db, user_id=current_user.id, action="DELETE_MENU", target_type="MENU", target_id=menu.id,
+        details=f"메뉴 삭제됨: {menu.name} (기존 가격: {menu.price}원)"
+    )
     
     db.delete(menu)
     db.commit()
@@ -1245,6 +1318,17 @@ def create_notice(notice: schemas.NoticeCreate, db: Session = Depends(get_db)):
     )
     db.add(new_notice)
     db.commit()
+
+    # ✨ [CCTV 추가] 공지 발송 타겟 기록
+    target_str = "플랫폼 전체"
+    if notice.target_type == "BRAND": target_str = f"브랜드(ID:{notice.target_brand_id}) 전체"
+    elif notice.target_type == "STORE": target_str = f"매장(ID:{notice.target_store_id})"
+
+    create_audit_log(
+        db=db, user_id=current_user.id, action="SEND_NOTICE", target_type="NOTICE", target_id=new_notice.id,
+        details=f"[{target_str}]에 공지 발송: '{notice.title}'"
+    )
+    
     return {"message": "발송 완료"}
 
 # 2. 안 읽은 공지사항 불러오기 API (팝업용)
@@ -1332,3 +1416,39 @@ def get_my_notices(db: Session = Depends(get_db), current_user: models.User = De
             "is_read": n.id in read_notice_ids
         })
     return result
+
+# =========================================================
+# 🕵️ 시스템 감사 로그 (Audit Log) API
+# =========================================================
+
+# 1. 블랙박스에 기록을 남기는 도우미 함수 (다른 API 안에서 사용됨)
+def create_audit_log(db: Session, user_id: int, action: str, target_type: str, target_id: int, details: str):
+    log = models.AuditLog(user_id=user_id, action=action, target_type=target_type, target_id=target_id, details=details)
+    db.add(log)
+    db.commit()
+
+# 2. 본사에서 블랙박스 기록을 열어보는 API
+@app.get("/admin/audit-logs")
+def get_audit_logs(db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
+    query = db.query(models.AuditLog).join(models.User)
+    
+    # 브랜드 관리자는 자기 브랜드 직원/점주들이 한 행동만 볼 수 있음
+    if current_user.role == "BRAND_ADMIN":
+        query = query.filter(models.User.brand_id == current_user.brand_id)
+    elif current_user.role != "SUPER_ADMIN":
+        return [] # 권한 없으면 빈값 리턴
+        
+    # 최신순으로 100개까지만 가져오기
+    logs = query.order_by(models.AuditLog.created_at.desc()).limit(100).all()
+    
+    return [
+        {
+            "id": log.id,
+            "user_name": log.user.name if log.user else "삭제된 사용자",
+            "user_email": log.user.email if log.user else "-",
+            "action": log.action,
+            "target_type": log.target_type,
+            "details": log.details,
+            "created_at": log.created_at
+        } for log in logs
+    ]
