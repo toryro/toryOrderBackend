@@ -284,6 +284,7 @@ class OrderItem(BaseModel):
     price: int
     quantity: int
     options_desc: Optional[str] = None
+    is_cancelled: Optional[bool] = False
     model_config = ConfigDict(from_attributes=True)
 
 class OrderResponse(OrderBase):
@@ -377,3 +378,9 @@ class NoticeCreate(BaseModel):
     target_type: str
     target_brand_id: Optional[int] = None
     target_store_id: Optional[int] = None
+
+# ✨ [신규] 결제 취소 요청 스키마
+class OrderCancelRequest(BaseModel):
+    reason: str = "관리자 화면에서 직접 취소"
+    amount: Optional[int] = None  # 값이 없으면 '전액 취소', 값이 있으면 '부분 취소'
+    cancelled_item_ids: List[int] = []  # ✨ [신규 추가] 취소하려고 체크한 메뉴 아이템의 ID 목록

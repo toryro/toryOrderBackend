@@ -230,6 +230,7 @@ class OrderItem(Base):
     price = Column(Integer)
     quantity = Column(Integer)
     options_desc = Column(String, nullable=True)
+    is_cancelled = Column(Boolean, default=False)
     order = relationship("Order", back_populates="items")
 
 class StaffCall(Base):
