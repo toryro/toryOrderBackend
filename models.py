@@ -122,8 +122,13 @@ class Menu(Base):
     
     category = relationship("Category", back_populates="menus")
     menu_option_links = relationship("MenuOptionLink", back_populates="menu", cascade="all, delete-orphan")
-    # ✨ [추가] 본사에서 가격 변경을 금지했는지 여부
-    is_price_fixed = Column(Boolean, default=False)
+    is_price_fixed = Column(Boolean, default=False) # 본사에서 가격 변경을 금지했는지 여부
+
+    # 할인 및 타임세일
+    is_discounted = Column(Boolean, default=False)
+    discount_price = Column(Integer, default=0)
+    time_sale_start = Column(String, nullable=True) # 예: "14:00"
+    time_sale_end = Column(String, nullable=True)   # 예: "17:00"
 
 class OptionGroup(Base):
     __tablename__ = "option_groups"

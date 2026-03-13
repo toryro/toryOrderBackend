@@ -600,6 +600,25 @@ def update_option(option_id: int, opt_update: schemas.OptionUpdate, db: Session 
     db.refresh(opt)
     return opt
 
+@app.patch("/categories/{category_id}", response_model=schemas.CategoryResponse)
+def update_category(category_id: int, category_update: schemas.CategoryUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
+    # 1. 수정할 카테고리 찾기
+    category = db.query(models.Category).filter(models.Category.id == category_id).first()
+    if not category: 
+        raise HTTPException(status_code=404, detail="카테고리를 찾을 수 없습니다.")
+    
+    # 2. 권한 검증 (내 매장의 카테고리가 맞는지 확인)
+    verify_store_permission(db, current_user, category.store_id)
+    
+    # 3. 프론트엔드에서 보낸 데이터(is_hidden 등)만 골라서 덮어쓰기
+    for key, value in category_update.dict(exclude_unset=True).items(): 
+        setattr(category, key, value)
+    
+    # 4. DB 저장
+    db.commit()
+    db.refresh(category)
+    return category
+
 @app.delete("/categories/{category_id}")
 def delete_category(category_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
     category = db.query(models.Category).filter(models.Category.id == category_id).first()

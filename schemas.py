@@ -106,6 +106,12 @@ class MenuBase(BaseModel):
     order_index: int = 0
     is_price_fixed: bool = False
 
+    #  할인 및 타임세일
+    is_discounted: bool = False
+    discount_price: int = 0
+    time_sale_start: Optional[str] = None
+    time_sale_end: Optional[str] = None
+
 class CategoryBase(BaseModel):
     name: str
     description: Optional[str] = None
@@ -217,6 +223,12 @@ class MenuUpdate(BaseModel):
     order_index: Optional[int] = None
     category_id: Optional[int] = None
     is_price_fixed: Optional[bool] = None
+
+    # 수정 요청(PATCH)에서 이 필드들을 통과시켜주도록 명단에 추가
+    is_discounted: Optional[bool] = None
+    discount_price: Optional[int] = None
+    time_sale_start: Optional[str] = None
+    time_sale_end: Optional[str] = None
 
 class OptionUpdate(BaseModel):
     name: Optional[str] = None
