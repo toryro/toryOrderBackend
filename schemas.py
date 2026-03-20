@@ -105,6 +105,7 @@ class MenuBase(BaseModel):
     image_url: Optional[str] = None 
     order_index: int = 0
     is_price_fixed: bool = False
+    target_time: Optional[int] = 15
 
     #  할인 및 타임세일
     is_discounted: bool = False
@@ -312,6 +313,7 @@ class OrderResponse(OrderBase):
     items: List[OrderItem] = []
     payment_status: str
     cooking_status: Optional[str] = "PENDING"
+    target_time: Optional[int] = 15
     model_config = ConfigDict(from_attributes=True)
 
 class UserResponse(UserBase):

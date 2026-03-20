@@ -277,3 +277,17 @@ async def update_cooking_status(order_id: int, db: Session = Depends(get_db), cu
     db.commit()
     
     return {"message": "조리 시작 상태로 변경되었습니다."}
+
+@router.patch("/orders/{order_id}/target-time")
+async def update_order_target_time(order_id: int, time_change: int, db: Session = Depends(get_db)):
+    # time_change는 +5 또는 -5 로 들어옵니다.
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+        
+    new_time = order.target_time + time_change
+    if new_time < 5: new_time = 5 # 최소 조리 시간은 5분으로 제한
+        
+    order.target_time = new_time
+    db.commit()
+    return {"message": "시간이 업데이트 되었습니다.", "target_time": new_time}
