@@ -153,6 +153,7 @@ class StoreBase(BaseModel):
     royalty_type: str = "PERCENTAGE" # ✨ 추가됨
     royalty_amount: float = 0.0      # ✨ 추가됨
     region: Optional[str] = "미지정"
+    payment_policy: str = "PRE_PAY" # ✨ 추가
 
 class StoreCreate(StoreBase):
     group_id: Optional[int] = None 
@@ -177,6 +178,7 @@ class StoreUpdate(BaseModel):
     royalty_amount: Optional[float] = None # ✨ 추가됨
     region: Optional[str] = None
     is_direct_manage: Optional[bool] = None
+    payment_policy: Optional[str] = None # ✨ 추가
 
 class OrderBase(BaseModel):
     store_id: int
@@ -258,6 +260,7 @@ class OrderItemCreate(BaseModel):
 
 class OrderCreate(OrderBase):
     items: List[OrderItemCreate]
+    is_post_pay: bool = False # ✨ 추가 (손님이 후불로 주문했는지 여부)
 
 class OptionResponse(OptionBase):
     id: int
@@ -308,6 +311,7 @@ class OrderResponse(OrderBase):
     table_name: Optional[str] = None 
     items: List[OrderItem] = []
     payment_status: str
+    cooking_status: Optional[str] = "PENDING"
     model_config = ConfigDict(from_attributes=True)
 
 class UserResponse(UserBase):

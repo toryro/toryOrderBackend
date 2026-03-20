@@ -66,7 +66,34 @@ async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)
             raise HTTPException(status_code=400, detail=f"잘못된 메뉴 요청입니다 (ID: {item.menu_id})")
         
     created_order = crud.create_order(db=db, order=order)
-    db.commit()
+    
+    # ✨ [핵심 수정] 후불 결제(POST_PAY)인 경우 처리 로직
+    if order.is_post_pay:
+        created_order.payment_status = "DEFERRED" # 상태를 '후불 결제 대기'로 변경
+        db.commit()
+        db.refresh(created_order)
+        
+        # PG결제를 안 하므로, 주문 즉시 주방으로 웹소켓 알림을 쏩니다!
+        try:
+            items_list = [{"menu_name": item.menu_name, "quantity": item.quantity, "options": item.options_desc or ""} for item in created_order.items]
+            created_at_val = created_order.created_at
+            created_at_str = created_at_val.strftime("%Y-%m-%d %H:%M:%S") if hasattr(created_at_val, 'strftime') else str(created_at_val)
+
+            message = json.dumps({
+                "type": "NEW_ORDER", 
+                "order_id": created_order.id, 
+                "daily_number": created_order.daily_number,
+                "table_name": created_order.table.name if created_order.table else "Unknown", 
+                "created_at": created_at_str, 
+                "items": items_list,
+                "is_post_pay": True # 프론트에 후불임을 알려줌
+            }, ensure_ascii=False)
+            await manager.broadcast(message, store_id=int(created_order.store_id))
+        except: 
+            pass
+    else:
+        db.commit() # 선불일 경우 PENDING 상태 그대로 둠 (이후 포트원 검증 API에서 PAID로 바뀜)
+        
     return created_order
 
 
@@ -78,10 +105,10 @@ async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)
 def read_store_orders(store_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
     verify_store_permission(db, current_user, store_id)
     
-    # 결제 완료 혹은 취소된 상태이면서, 아직 '처리 완료(조리 완료)'되지 않은 주문만 가져옴
+    # ✨ [수정] "DEFERRED"(후불 대기) 상태인 주문도 주방 모니터에 뜨도록 리스트에 추가!
     orders = db.query(models.Order).filter(
         models.Order.store_id == store_id,
-        models.Order.payment_status.in_(["PAID", "PARTIAL_CANCELLED", "CANCELLED"]),
+        models.Order.payment_status.in_(["PAID", "DEFERRED", "PARTIAL_CANCELLED", "CANCELLED"]),
         models.Order.is_completed == False 
     ).order_by(models.Order.id.asc()).all()
 
@@ -94,7 +121,7 @@ def read_store_orders(store_id: int, db: Session = Depends(get_db), current_user
     return result
 
 @router.patch("/orders/{order_id}/complete")
-def complete_order(order_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
+async def complete_order(order_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
     order = db.query(models.Order).filter(models.Order.id == order_id).first()
     if not order: 
         raise HTTPException(status_code=404, detail="주문을 찾을 수 없습니다.")
@@ -102,6 +129,13 @@ def complete_order(order_id: int, db: Session = Depends(get_db), current_user: m
     verify_store_permission(db, current_user, order.store_id)
     order.is_completed = True 
     db.commit()
+
+    # ✨ [추가된 부분] 매장의 다른 주방 모니터에도 완료되었다고 실시간 알림 전송
+    try:
+        message = json.dumps({"type": "ORDER_COMPLETED", "order_id": order_id}, ensure_ascii=False)
+        await manager.broadcast(message, store_id=int(order.store_id))
+    except: 
+        pass
     
     return {"message": "Order completed"}
 
@@ -226,3 +260,20 @@ def read_store_order_history(store_id: int, db: Session = Depends(get_db), curre
         result.append(order_data)
         
     return result
+
+# =========================================================
+# ✨ [신규 추가] 조리 시작 상태로 변경 API
+# =========================================================
+@router.patch("/orders/{order_id}/cooking")
+async def update_cooking_status(order_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="주문을 찾을 수 없습니다.")
+        
+    verify_store_permission(db, current_user, order.store_id)
+    
+    # 상태를 COOKING(조리중)으로 업데이트하고 저장
+    order.cooking_status = "COOKING"
+    db.commit()
+    
+    return {"message": "조리 시작 상태로 변경되었습니다."}

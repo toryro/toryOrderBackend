@@ -130,7 +130,7 @@ def read_active_calls(store_id: int, db: Session = Depends(get_db), current_user
     ]
 
 @router.patch("/calls/{call_id}/complete")
-def complete_staff_call(call_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
+async def complete_staff_call(call_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
     # 호출 확인 처리
     call = db.query(models.StaffCall).filter(models.StaffCall.id == call_id).first()
     if not call: 
@@ -139,5 +139,12 @@ def complete_staff_call(call_id: int, db: Session = Depends(get_db), current_use
     verify_store_permission(db, current_user, call.store_id)
     call.is_completed = True
     db.commit()
+    
+    # ✨ [추가된 부분] 다른 화면에서도 직원 호출 카드 지우기
+    try:
+        message = json.dumps({"type": "CALL_COMPLETED", "call_id": call_id}, ensure_ascii=False)
+        await manager.broadcast(message, store_id=int(call.store_id))
+    except: 
+        pass
     
     return {"message": "호출 처리가 완료되었습니다."}

@@ -73,6 +73,8 @@ class Store(Base):
     royalty_amount = Column(Float, default=0.0) # 퍼센트 비율(%) 또는 고정금액(원)
     # ✨ [추가] 매장 지역 분류
     region = Column(String, default="미지정")
+    # ✨ [신규 추가] 매장의 결제 정책 (PRE_PAY: 선불, POST_PAY: 후불)
+    payment_policy = Column(String, default="PRE_PAY")
 
 # ⚠️ 2그룹: 예외 (관리자 때문에 nullable=True 유지)
 class User(Base):
@@ -213,6 +215,8 @@ class Order(Base):
     table_id = Column(Integer, ForeignKey("tables.id"), nullable=True)
     
     payment_status = Column(String, default="PENDING") 
+    # ✨ [신규 추가] 조리 상태 저장용 컬럼
+    cooking_status = Column(String, default="PENDING")
     payment_method = Column(String, nullable=True)
     imp_uid = Column(String, nullable=True)
     merchant_uid = Column(String, unique=True, nullable=True)
