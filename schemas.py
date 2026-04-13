@@ -107,7 +107,7 @@ class MenuBase(BaseModel):
     is_price_fixed: bool = False
     target_time: Optional[int] = 15
 
-    #  할인 및 타임세일
+    # 할인 및 타임세일
     is_discounted: bool = False
     discount_price: int = 0
     time_sale_start: Optional[str] = None
@@ -119,8 +119,10 @@ class CategoryBase(BaseModel):
     order_index: int = 0
     is_hidden: bool = False
 
+# ✨ [수정됨] 테이블 기본 스키마에 포장/매장 설정 추가
 class TableBase(BaseModel):
     name: str
+    order_type_setting: Optional[str] = "SELECTABLE" # 'SELECTABLE', 'DINE_IN_ONLY', 'TAKEOUT_ONLY'
 
 class GroupBase(BaseModel):
     name: str
@@ -151,10 +153,11 @@ class StoreBase(BaseModel):
     open_time: Optional[str] = None
     close_time: Optional[str] = None
     price_markup: int = 0
-    royalty_type: str = "PERCENTAGE" # ✨ 추가됨
-    royalty_amount: float = 0.0      # ✨ 추가됨
+    royalty_type: str = "PERCENTAGE" 
+    royalty_amount: float = 0.0      
     region: Optional[str] = "미지정"
-    payment_policy: str = "PRE_PAY" # ✨ 추가
+    payment_policy: str = "PRE_PAY" 
+    use_table_board: bool = True
 
 class StoreCreate(StoreBase):
     group_id: Optional[int] = None 
@@ -173,13 +176,14 @@ class StoreUpdate(BaseModel):
     open_time: Optional[str] = None
     close_time: Optional[str] = None
     is_open: Optional[bool] = None 
-    brand_id: Optional[int] = None # 추가됨
+    brand_id: Optional[int] = None 
     price_markup: Optional[int] = None
-    royalty_type: Optional[str] = None     # ✨ 추가됨
-    royalty_amount: Optional[float] = None # ✨ 추가됨
+    royalty_type: Optional[str] = None     
+    royalty_amount: Optional[float] = None 
     region: Optional[str] = None
     is_direct_manage: Optional[bool] = None
-    payment_policy: Optional[str] = None # ✨ 추가
+    payment_policy: Optional[str] = None 
+    use_table_board: Optional[bool] = None
 
 class OrderBase(BaseModel):
     store_id: int
@@ -226,8 +230,6 @@ class MenuUpdate(BaseModel):
     order_index: Optional[int] = None
     category_id: Optional[int] = None
     is_price_fixed: Optional[bool] = None
-
-    # 수정 요청(PATCH)에서 이 필드들을 통과시켜주도록 명단에 추가
     is_discounted: Optional[bool] = None
     discount_price: Optional[int] = None
     time_sale_start: Optional[str] = None
@@ -246,8 +248,10 @@ class OptionGroupUpdate(BaseModel):
     max_select: Optional[int] = None
     order_index: Optional[int] = None
 
+# ✨ [수정됨] 테이블 업데이트 시 설정값도 수정 가능하도록 변경
 class TableUpdate(BaseModel):
-    name: str
+    name: Optional[str] = None
+    order_type_setting: Optional[str] = None
 
 class OrderItemOptionCreate(BaseModel):
     name: str
@@ -261,7 +265,8 @@ class OrderItemCreate(BaseModel):
 
 class OrderCreate(OrderBase):
     items: List[OrderItemCreate]
-    is_post_pay: bool = False # ✨ 추가 (손님이 후불로 주문했는지 여부)
+    is_post_pay: bool = False 
+    order_type: str = "DINE_IN" # ✨ [신규 추가] 주문 시 포장/매장 여부 전달
 
 class OptionResponse(OptionBase):
     id: int
@@ -278,7 +283,6 @@ class MenuResponse(MenuBase):
     id: int
     category_id: int
     option_groups: List[OptionGroupResponse] = []
-    # 🔥 [신규] 레시피 정보 포함
     recipes: List[RecipeResponse] = [] 
     model_config = ConfigDict(from_attributes=True)
 
@@ -292,7 +296,11 @@ class TableResponse(TableBase):
     id: int
     store_id: int
     qr_token: Optional[str] = None
+    order_type_setting: str # ✨ [신규 추가] 응답에 포함
+    current_status: str = "EMPTY"
+    occupied_at: Optional[str] = None
     model_config = ConfigDict(from_attributes=True)
+
 
 class OrderItem(BaseModel):
     id: int
@@ -314,6 +322,7 @@ class OrderResponse(OrderBase):
     payment_status: str
     cooking_status: Optional[str] = "PENDING"
     target_time: Optional[int] = 15
+    order_type: str = "DINE_IN" # ✨ [신규 추가] 응답에 포함
     model_config = ConfigDict(from_attributes=True)
 
 class UserResponse(UserBase):
@@ -373,21 +382,21 @@ class StoreResponse(StoreBase):
     tables: List[TableResponse] = []
     model_config = ConfigDict(from_attributes=True)
 
-# --- [신규] 본사(HQ) 통합 매출 통계 스키마 ---
+# --- 본사(HQ) 통합 매출 통계 스키마 ---
 class HQStoreStat(BaseModel):
     store_id: int
     store_name: str
-    brand_name: Optional[str] = None # ✨ [추가됨] 브랜드 이름
-    region: str # ✨ 추가됨
-    is_direct_manage: bool # ✨ 추가됨
+    brand_name: Optional[str] = None 
+    region: str 
+    is_direct_manage: bool 
     revenue: int
     order_count: int
-    royalty_fee: int # ✨ 추가됨 (계산 완료된 로열티 금액)
+    royalty_fee: int 
 
 class HQSalesStatResponse(BaseModel):
     total_revenue: int
     total_order_count: int
-    total_royalty_fee: int # ✨ 추가됨 (전체 지점 로열티 합계)
+    total_royalty_fee: int 
     store_stats: List[HQStoreStat]
 
 class NoticeCreate(BaseModel):
@@ -397,8 +406,11 @@ class NoticeCreate(BaseModel):
     target_brand_id: Optional[int] = None
     target_store_id: Optional[int] = None
 
-# ✨ [신규] 결제 취소 요청 스키마
 class OrderCancelRequest(BaseModel):
     reason: str = "관리자 화면에서 직접 취소"
-    amount: Optional[int] = None  # 값이 없으면 '전액 취소', 값이 있으면 '부분 취소'
-    cancelled_item_ids: List[int] = []  # ✨ [신규 추가] 취소하려고 체크한 메뉴 아이템의 ID 목록
+    amount: Optional[int] = None  
+    cancelled_item_ids: List[int] = []
+
+    # 상태 변경을 위한 요청 데이터 스키마
+class TableStatusUpdate(BaseModel):
+    status: str # "EMPTY", "OCCUPIED", "CLEANING_REQUESTED"

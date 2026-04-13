@@ -29,11 +29,16 @@ def create_table_for_store(store_id: int, table: schemas.TableCreate, db: Sessio
 
 @router.get("/tables/by-token/{qr_token}")
 def get_table_by_token(qr_token: str, db: Session = Depends(get_db)):
-    # 손님이 QR 스캔 시 테이블 정보를 가져오는 API (비로그인 허용)
     table = db.query(models.Table).filter(models.Table.qr_token == qr_token).first()
     if not table: 
         raise HTTPException(status_code=404, detail="유효하지 않은 QR 코드입니다.")
-    return {"store_id": table.store_id, "table_id": table.id, "label": table.name}
+    # ✨ order_type_setting 추가 리턴
+    return {
+        "store_id": table.store_id, 
+        "table_id": table.id, 
+        "label": table.name,
+        "order_type_setting": table.order_type_setting 
+    }
 
 @router.patch("/tables/{table_id}", response_model=schemas.TableResponse)
 def update_table(table_id: int, table_update: schemas.TableUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
@@ -146,5 +151,27 @@ async def complete_staff_call(call_id: int, db: Session = Depends(get_db), curre
         await manager.broadcast(message, store_id=int(call.store_id))
     except: 
         pass
-    
+
     return {"message": "호출 처리가 완료되었습니다."}
+
+# =========================================================
+# ✨ [신규 추가] 테이블 상태 수동 변경 API
+# =========================================================
+@router.patch("/tables/{table_id}/status")
+async def update_table_status(table_id: int, req: schemas.TableStatusUpdate, db: Session = Depends(get_db)): # 👈 req 타입을 schemas.TableStatusUpdate로 변경!
+    table = db.query(models.Table).filter(models.Table.id == table_id).first()
+    if not table:
+        raise HTTPException(status_code=404, detail="테이블을 찾을 수 없습니다.")
+    
+    table.current_status = req.status
+    
+    # 빈 테이블로 바뀔 때는 타이머 기록을 초기화
+    if req.status == "EMPTY":
+        table.occupied_at = None
+    # 식사 중으로 수동 변경 시 현재 시간 기록
+    elif req.status == "OCCUPIED" and not table.occupied_at:
+        table.occupied_at = datetime.now()
+        
+    db.commit()
+    
+    return {"message": "테이블 상태가 변경되었습니다.", "status": table.current_status}

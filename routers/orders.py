@@ -72,6 +72,16 @@ async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)
         created_order.payment_status = "DEFERRED" # 상태를 '후불 결제 대기'로 변경
         db.commit()
         db.refresh(created_order)
+
+        # =======================================================
+        # ✨ [여기에 1차 추가!] 후불 결제 시 즉시 테이블을 식사 중으로 변경
+        from datetime import datetime
+        table = db.query(models.Table).filter(models.Table.id == created_order.table_id).first()
+        if table and table.current_status != "OCCUPIED":
+            table.current_status = "OCCUPIED"
+            table.occupied_at = datetime.now()
+            db.commit()
+        # =======================================================
         
         # PG결제를 안 하므로, 주문 즉시 주방으로 웹소켓 알림을 쏩니다!
         try:
@@ -86,6 +96,7 @@ async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)
                 "table_name": created_order.table.name if created_order.table else "Unknown", 
                 "created_at": created_at_str, 
                 "items": items_list,
+                "order_type": order.order_type,
                 "is_post_pay": True # 프론트에 후불임을 알려줌
             }, ensure_ascii=False)
             await manager.broadcast(message, store_id=int(created_order.store_id))
@@ -204,6 +215,16 @@ async def verify_payment(payload: schemas.PaymentVerifyRequest, db: Session = De
         order.paid_amount = payment_data['amount']
         db.commit()
 
+        # =======================================================
+        # ✨ [여기에 2차 추가!] 선불 결제 완료 시 테이블을 식사 중으로 변경
+        from datetime import datetime
+        table = db.query(models.Table).filter(models.Table.id == order.table_id).first()
+        if table and table.current_status != "OCCUPIED":
+            table.current_status = "OCCUPIED"
+            table.occupied_at = datetime.now()
+            db.commit()
+        # =======================================================
+
         # 6. 매장 POS(주문 모니터)로 웹소켓 실시간 알림 전송
         try:
             items_list = [
@@ -223,6 +244,7 @@ async def verify_payment(payload: schemas.PaymentVerifyRequest, db: Session = De
                 "daily_number": order.daily_number,
                 "table_name": order.table.name if order.table else "Unknown", 
                 "created_at": created_at_str, 
+                "order_type": order.order_type,
                 "items": items_list
             }, ensure_ascii=False)
             

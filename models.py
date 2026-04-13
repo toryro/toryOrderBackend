@@ -75,6 +75,7 @@ class Store(Base):
     region = Column(String, default="미지정")
     # ✨ [신규 추가] 매장의 결제 정책 (PRE_PAY: 선불, POST_PAY: 후불)
     payment_policy = Column(String, default="PRE_PAY")
+    use_table_board = Column(Boolean, default=True)
 
 # ⚠️ 2그룹: 예외 (관리자 때문에 nullable=True 유지)
 class User(Base):
@@ -173,10 +174,13 @@ class Table(Base):
     store_id = Column(Integer, ForeignKey("stores.id"), index=True, nullable=False) # 🔥 수정됨
     name = Column(String)
     qr_token = Column(String, unique=True, index=True)
+    order_type_setting = Column(String, default="SELECTABLE") # 'SELECTABLE', 'DINE_IN_ONLY', 'TAKEOUT_ONLY'
     
     store = relationship("Store", back_populates="tables")
     orders = relationship("Order", back_populates="table")
     staff_calls = relationship("StaffCall", back_populates="table")
+    current_status = Column(String, default="EMPTY") 
+    occupied_at = Column(DateTime, nullable=True)
 
 class CallOption(Base):
     __tablename__ = "call_options"
@@ -223,6 +227,7 @@ class Order(Base):
     imp_uid = Column(String, nullable=True)
     merchant_uid = Column(String, unique=True, nullable=True)
     paid_amount = Column(Integer, default=0)
+    order_type = Column(String, default="DINE_IN") # 'DINE_IN', 'TAKEOUT'
 
     store = relationship("Store", back_populates="orders")
     table = relationship("Table", back_populates="orders")
