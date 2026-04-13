@@ -158,6 +158,7 @@ class StoreBase(BaseModel):
     region: Optional[str] = "미지정"
     payment_policy: str = "PRE_PAY" 
     use_table_board: bool = True
+    use_menu_detail: bool = False #상세페이지 사용 여부
 
 class StoreCreate(StoreBase):
     group_id: Optional[int] = None 
@@ -177,13 +178,15 @@ class StoreUpdate(BaseModel):
     close_time: Optional[str] = None
     is_open: Optional[bool] = None 
     brand_id: Optional[int] = None 
-    price_markup: Optional[int] = None
-    royalty_type: Optional[str] = None     
-    royalty_amount: Optional[float] = None 
-    region: Optional[str] = None
+
+    price_markup: int = 0
+    royalty_type: str = "PERCENTAGE"   
+    royalty_amount: float = 0.0
+    region: Optional[str] = "미지정"
     is_direct_manage: Optional[bool] = None
-    payment_policy: Optional[str] = None 
-    use_table_board: Optional[bool] = None
+    payment_policy: str = "PRE_PAY"
+    use_table_board: bool = True
+    use_menu_detail: bool = False #상세페이지 사용 여부
 
 class OrderBase(BaseModel):
     store_id: int

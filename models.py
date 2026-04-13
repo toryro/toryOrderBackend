@@ -76,6 +76,7 @@ class Store(Base):
     # ✨ [신규 추가] 매장의 결제 정책 (PRE_PAY: 선불, POST_PAY: 후불)
     payment_policy = Column(String, default="PRE_PAY")
     use_table_board = Column(Boolean, default=True)
+    use_menu_detail = Column(Boolean, default=False) # 상세페이지 사용 여부
 
 # ⚠️ 2그룹: 예외 (관리자 때문에 nullable=True 유지)
 class User(Base):
