@@ -130,7 +130,7 @@ class Menu(Base):
 
     # 할인 및 타임세일
     is_discounted = Column(Boolean, default=False)
-    discount_price = Column(Integer, default=0)
+    discount_price = Column(Integer, nullable=True, default=0)
     time_sale_start = Column(String, nullable=True) # 예: "14:00"
     time_sale_end = Column(String, nullable=True)   # 예: "17:00"
     target_time = Column(Integer, default=15) # ✨ 신규: 메뉴별 기본 조리시간 (분)
@@ -217,11 +217,10 @@ class Order(Base):
     daily_number = Column(Integer, default=1)
     total_price = Column(Integer)
     is_completed = Column(Boolean, default=False)
-    created_at = Column(String, default=lambda: str(datetime.now()))
+    created_at = Column(DateTime, default=datetime.now)
     table_id = Column(Integer, ForeignKey("tables.id"), nullable=True)
     
     payment_status = Column(String, default="PENDING") 
-    # ✨ [신규 추가] 조리 상태 저장용 컬럼
     cooking_status = Column(String, default="PENDING")
     target_time = Column(Integer, default=15) # ✨ 신규: 이 주문서의 목표 조리시간 (분)
     payment_method = Column(String, nullable=True)
@@ -260,6 +259,11 @@ class StaffCall(Base):
     created_at = Column(String, default=lambda: str(datetime.now()))
     store = relationship("Store", back_populates="staff_calls")
     table = relationship("Table", back_populates="staff_calls")
+
+    # 응답 스키마(StaffCallResponse)가 table_name을 찾을 때 이걸 돌려줍니다.
+    @property
+    def table_name(self):
+        return self.table.name if self.table else "알 수 없음"
 
 class Notice(Base):
     __tablename__ = "notices"

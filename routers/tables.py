@@ -2,6 +2,9 @@ import json
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
+from datetime import datetime
+
+import uuid
 
 # 프로젝트 내부 모듈
 import models
@@ -117,22 +120,14 @@ async def create_staff_call(store_id: int, call: schemas.StaffCallCreate, db: Se
 @router.get("/stores/{store_id}/calls", response_model=List[schemas.StaffCallResponse])
 def read_active_calls(store_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
     verify_store_permission(db, current_user, store_id)
-    # 아직 완료되지 않은(is_completed=False) 호출 목록만 조회
     calls = db.query(models.StaffCall).filter(
         models.StaffCall.store_id == store_id, 
         models.StaffCall.is_completed == False
     ).all()
     
-    return [
-        schemas.StaffCallResponse(
-            id=c.id, 
-            table_id=c.table_id, 
-            message=c.message, 
-            created_at=c.created_at, 
-            is_completed=c.is_completed, 
-            table_name=c.table.name if c.table else "Unknown"
-        ) for c in calls
-    ]
+    # 💡 models.py에 정의하신 @property table_name 덕분에 
+    # 별도의 루프 없이 바로 리턴해도 schemas.StaffCallResponse가 알아서 인식합니다.
+    return calls
 
 @router.patch("/calls/{call_id}/complete")
 async def complete_staff_call(call_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
@@ -158,20 +153,50 @@ async def complete_staff_call(call_id: int, db: Session = Depends(get_db), curre
 # ✨ [신규 추가] 테이블 상태 수동 변경 API
 # =========================================================
 @router.patch("/tables/{table_id}/status")
-async def update_table_status(table_id: int, req: schemas.TableStatusUpdate, db: Session = Depends(get_db)): # 👈 req 타입을 schemas.TableStatusUpdate로 변경!
+async def update_table_status(
+    table_id: int, 
+    req: schemas.TableStatusUpdate, 
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user) # ✨ 토큰 인증 추가
+):
     table = db.query(models.Table).filter(models.Table.id == table_id).first()
     if not table:
         raise HTTPException(status_code=404, detail="테이블을 찾을 수 없습니다.")
     
+    # ✨ 보안 추가: 내 매장의 테이블인지 확인
+    verify_store_permission(db, current_user, table.store_id)
+    
     table.current_status = req.status
     
-    # 빈 테이블로 바뀔 때는 타이머 기록을 초기화
     if req.status == "EMPTY":
         table.occupied_at = None
-    # 식사 중으로 수동 변경 시 현재 시간 기록
     elif req.status == "OCCUPIED" and not table.occupied_at:
         table.occupied_at = datetime.now()
         
     db.commit()
-    
     return {"message": "테이블 상태가 변경되었습니다.", "status": table.current_status}
+
+# =========================================================
+# ✨ [신규 추가] 현황판 퇴석 처리 및 QR 토큰 갱신 API
+# =========================================================
+@router.post("/tables/{table_id}/clear")
+def clear_table(table_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
+    table = db.query(models.Table).filter(models.Table.id == table_id).first()
+    if not table:
+        raise HTTPException(status_code=404, detail="테이블을 찾을 수 없습니다.")
+    
+    # 1. 상태 초기화
+    table.current_status = "EMPTY"
+    table.occupied_at = None
+    
+    # 2. 핵심 보안! 이전 손님이 찍은 QR코드 무효화
+    table.qr_token = str(uuid.uuid4())[:8] 
+    
+    db.commit()
+    return {"message": "테이블이 성공적으로 비워졌습니다."}
+
+@router.get("/stores/{store_id}/tables", response_model=List[schemas.TableResponse])
+def get_tables_for_store(store_id: int, db: Session = Depends(get_db)):
+    # 해당 매장의 모든 테이블을 조회해서 현황판으로 보내줍니다.
+    tables = db.query(models.Table).filter(models.Table.store_id == store_id).all()
+    return tables

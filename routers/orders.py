@@ -27,7 +27,6 @@ router = APIRouter(tags=["Orders & Payments"])
 # =========================================================
 # 🛒 주문 생성 (프론트엔드/손님용)
 # =========================================================
-
 @router.post("/orders/", response_model=schemas.OrderResponse)
 async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)):
     now = datetime.now()
@@ -66,22 +65,23 @@ async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)
             raise HTTPException(status_code=400, detail=f"잘못된 메뉴 요청입니다 (ID: {item.menu_id})")
         
     created_order = crud.create_order(db=db, order=order)
-    
-    # ✨ [핵심 수정] 후불 결제(POST_PAY)인 경우 처리 로직
-    if order.is_post_pay:
-        created_order.payment_status = "DEFERRED" # 상태를 '후불 결제 대기'로 변경
-        db.commit()
-        db.refresh(created_order)
 
-        # =======================================================
-        # ✨ [여기에 1차 추가!] 후불 결제 시 즉시 테이블을 식사 중으로 변경
-        from datetime import datetime
+    # =====================================================================
+    # ✨ [핵심 해결 위치!] 선불/후불 상관없이 주문서가 만들어지자마자 무조건 테이블 상태 변경!
+    # =====================================================================
+    if created_order.table_id:
         table = db.query(models.Table).filter(models.Table.id == created_order.table_id).first()
         if table and table.current_status != "OCCUPIED":
             table.current_status = "OCCUPIED"
             table.occupied_at = datetime.now()
             db.commit()
-        # =======================================================
+    # =====================================================================
+    
+    # ✨ 후불 결제(POST_PAY)인 경우 처리 로직
+    if order.is_post_pay:
+        created_order.payment_status = "DEFERRED" # 상태를 '후불 결제 대기'로 변경
+        db.commit()
+        db.refresh(created_order)
         
         # PG결제를 안 하므로, 주문 즉시 주방으로 웹소켓 알림을 쏩니다!
         try:
@@ -103,7 +103,7 @@ async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)
         except: 
             pass
     else:
-        db.commit() # 선불일 경우 PENDING 상태 그대로 둠 (이후 포트원 검증 API에서 PAID로 바뀜)
+        db.commit() # 선불일 경우 PENDING 상태 그대로 둠
         
     return created_order
 

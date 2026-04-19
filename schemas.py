@@ -1,6 +1,7 @@
 from pydantic import BaseModel, ConfigDict
 from typing import List, Optional
 from models import UserRole 
+from datetime import datetime
 
 # --- 브랜드(본사) 스키마 ---
 class BrandBase(BaseModel):
@@ -152,13 +153,15 @@ class StoreBase(BaseModel):
 
     open_time: Optional[str] = None
     close_time: Optional[str] = None
-    price_markup: int = 0
-    royalty_type: str = "PERCENTAGE" 
-    royalty_amount: float = 0.0      
+    
+    # ✨ [핵심 수정] DB에 값이 비어있을(NULL) 경우를 대비해 모두 Optional을 붙여줍니다!
+    price_markup: Optional[int] = 0
+    royalty_type: Optional[str] = "PERCENTAGE" 
+    royalty_amount: Optional[float] = 0.0      
     region: Optional[str] = "미지정"
-    payment_policy: str = "PRE_PAY" 
-    use_table_board: bool = True
-    use_menu_detail: bool = False #상세페이지 사용 여부
+    payment_policy: Optional[str] = "PRE_PAY" 
+    use_table_board: Optional[bool] = True
+    use_menu_detail: Optional[bool] = False # 상세페이지 사용 여부
 
 class StoreCreate(StoreBase):
     group_id: Optional[int] = None 
@@ -285,6 +288,7 @@ class OptionGroupResponse(OptionGroupBase):
 class MenuResponse(MenuBase):
     id: int
     category_id: int
+    discount_price: Optional[int] = 0
     option_groups: List[OptionGroupResponse] = []
     recipes: List[RecipeResponse] = [] 
     model_config = ConfigDict(from_attributes=True)
@@ -299,9 +303,9 @@ class TableResponse(TableBase):
     id: int
     store_id: int
     qr_token: Optional[str] = None
-    order_type_setting: str # ✨ [신규 추가] 응답에 포함
+    order_type_setting: str 
     current_status: str = "EMPTY"
-    occupied_at: Optional[str] = None
+    occupied_at: Optional[datetime] = None  # ✨ str을 datetime으로 변경!
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -318,7 +322,7 @@ class OrderResponse(OrderBase):
     id: int
     daily_number: int
     total_price: int
-    created_at: str
+    created_at: datetime
     is_completed: bool
     table_name: Optional[str] = None 
     items: List[OrderItem] = []
