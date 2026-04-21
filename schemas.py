@@ -162,6 +162,10 @@ class StoreBase(BaseModel):
     payment_policy: Optional[str] = "PRE_PAY" 
     use_table_board: Optional[bool] = True
     use_menu_detail: Optional[bool] = False # 상세페이지 사용 여부
+    has_pos: Optional[bool] = None
+    printer_config: Optional[str] = "NONE"
+    auto_kitchen_print: Optional[bool] = False
+    allow_staff_order: Optional[bool] = True
 
 class StoreCreate(StoreBase):
     group_id: Optional[int] = None 
@@ -190,6 +194,10 @@ class StoreUpdate(BaseModel):
     payment_policy: str = "PRE_PAY"
     use_table_board: bool = True
     use_menu_detail: bool = False #상세페이지 사용 여부
+    has_pos: Optional[bool] = None  # 관리자 페이지에서 토글할 수 있도록 추가
+    printer_config: Optional[str] = None
+    auto_kitchen_print: Optional[bool] = None
+    allow_staff_order: Optional[bool] = None
 
 class OrderBase(BaseModel):
     store_id: int
@@ -307,6 +315,7 @@ class TableResponse(TableBase):
     current_status: str = "EMPTY"
     occupied_at: Optional[datetime] = None  # ✨ str을 datetime으로 변경!
     model_config = ConfigDict(from_attributes=True)
+    is_virtual: bool = False # ✨ 가상 세션 여부 플래그
 
 
 class OrderItem(BaseModel):
@@ -421,3 +430,22 @@ class OrderCancelRequest(BaseModel):
     # 상태 변경을 위한 요청 데이터 스키마
 class TableStatusUpdate(BaseModel):
     status: str # "EMPTY", "OCCUPIED", "CLEANING_REQUESTED"
+
+# --- 가상 세션(VirtualSession) 신규 스키마 ---
+class VirtualSessionResponse(BaseModel):
+    id: int
+    store_id: int
+    token: str
+    is_active: bool
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+# --- Table 조회 응답 통합용 ---
+# 프론트엔드의 OrderPage.jsx가 테이블과 가상 세션을 똑같이 처리할 수 있도록 
+# 응답 규격을 맞춰줍니다.
+class TableTokenResponse(BaseModel):
+    table_id: Optional[int] = None
+    store_id: int
+    label: str
+    order_type_setting: str
+    is_virtual: bool = False  # ✨ 이 값이 True면 프론트엔드에서 무조건 선결제로 강제!

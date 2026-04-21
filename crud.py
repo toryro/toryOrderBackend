@@ -209,3 +209,33 @@ def create_order(db: Session, order: schemas.OrderCreate):
     db.commit()
     db.refresh(db_order)
     return db_order
+
+
+# 1. 가상 세션(임시 토큰) 생성
+def create_virtual_session(db: Session, store_id: int):
+    new_token = str(uuid.uuid4()) # 고유한 임시 토큰 발급
+    db_session = models.VirtualSession(
+        store_id=store_id,
+        token=new_token,
+        is_active=True
+    )
+    db.add(db_session)
+    db.commit()
+    db.refresh(db_session)
+    return db_session
+
+# 2. 가상 세션 검증 (활성화된 토큰인지 확인)
+def get_active_virtual_session(db: Session, token: str):
+    return db.query(models.VirtualSession).filter(
+        models.VirtualSession.token == token,
+        models.VirtualSession.is_active == True
+    ).first()
+
+# 3. 결제 완료 시 가상 세션 즉시 파기 (종료 처리)
+def invalidate_virtual_session(db: Session, token: str):
+    db_session = get_active_virtual_session(db, token)
+    if db_session:
+        db_session.is_active = False
+        db.commit()
+        return True
+    return False

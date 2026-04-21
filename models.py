@@ -66,7 +66,7 @@ class Store(Base):
     holidays = relationship("Holiday", back_populates="store", cascade="all, delete-orphan")
     staff_calls = relationship("StaffCall", back_populates="store", cascade="all, delete-orphan")
     call_options = relationship("CallOption", back_populates="store", cascade="all, delete-orphan")
-    # ✨ [추가] 지점별 기본 가격 할증 (예: 강남점은 500)
+    # 지점별 기본 가격 할증 (예: 강남점은 500)
     price_markup = Column(Integer, default=0)
     # ✨ [추가] 가맹점 로열티 산출 방식 및 값
     royalty_type = Column(String, default="PERCENTAGE") # "PERCENTAGE" 또는 "FIXED"
@@ -77,6 +77,10 @@ class Store(Base):
     payment_policy = Column(String, default="PRE_PAY")
     use_table_board = Column(Boolean, default=True)
     use_menu_detail = Column(Boolean, default=False) # 상세페이지 사용 여부
+    has_pos = Column(Boolean, default=False) # ✨ POS 시스템 사용 여부
+    printer_config = Column(String, default="NONE") # NONE, UNIFIED, SEPARATE
+    auto_kitchen_print = Column(Boolean, default=False)
+    allow_staff_order = Column(Boolean, default=True)
 
 # ⚠️ 2그룹: 예외 (관리자 때문에 nullable=True 유지)
 class User(Base):
@@ -296,3 +300,12 @@ class AuditLog(Base):
     
     # 누가 했는지 이름을 쉽게 가져오기 위한 연결고리
     user = relationship("User")
+
+# ✨ 신규: 포장 전용 1회용 가상 세션 (직원이 퇴석할 물리적 테이블이 없는 경우 사용)
+class VirtualSession(Base):
+    __tablename__ = "virtual_sessions"
+    id = Column(Integer, primary_key=True, index=True)
+    store_id = Column(Integer, ForeignKey("stores.id"))
+    token = Column(String, unique=True, index=True) # 1회용 UUID 토큰
+    is_active = Column(Boolean, default=True)       # 결제 완료 시 False로 변경하여 즉시 파기
+    created_at = Column(DateTime, default=datetime.utcnow)

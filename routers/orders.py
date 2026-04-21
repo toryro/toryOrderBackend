@@ -12,7 +12,7 @@ import schemas
 import crud
 import dependencies
 from database import get_db
-from connection_manager import manager  # 웹소켓 브로드캐스트를 위해 임포트
+from connection_manager import manager  # 웹소켓 브로드캐스트
 
 # 공통 함수 (utils.py)
 from utils import verify_store_permission, send_discord_alert
@@ -21,19 +21,21 @@ from utils import verify_store_permission, send_discord_alert
 PORTONE_API_KEY = os.getenv("PORTONE_API_KEY")
 PORTONE_API_SECRET = os.getenv("PORTONE_API_SECRET")
 
-# ✨ 라우터 생성
+# 라우터 생성
 router = APIRouter(tags=["Orders & Payments"])
 
+
 # =========================================================
-# 🛒 주문 생성 (프론트엔드/손님용)
+# 🛒 [그룹 1] 주문 생성 및 결제 (손님 & 직원 공통)
 # =========================================================
+
 @router.post("/orders/", response_model=schemas.OrderResponse)
 async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)):
     now = datetime.now()
     current_time_str = now.strftime("%H:%M") 
     current_weekday = now.weekday()          
 
-    # 영업 시간 및 브레이크 타임 검증
+    # 1. 영업 시간 및 브레이크 타임 검증
     today_hours = db.query(models.OperatingHour).filter(
         models.OperatingHour.store_id == order.store_id, 
         models.OperatingHour.day_of_week == current_weekday
@@ -55,7 +57,7 @@ async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)
             except: 
                 pass 
 
-    # 요청된 메뉴가 실제 존재하는지 확인
+    # 2. 요청된 메뉴 유효성 확인
     for item in order.items:
         menu = db.query(models.Menu).filter(
             models.Menu.id == item.menu_id, 
@@ -64,26 +66,27 @@ async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)
         if not menu: 
             raise HTTPException(status_code=400, detail=f"잘못된 메뉴 요청입니다 (ID: {item.menu_id})")
         
+    # 3. DB에 주문 생성
     created_order = crud.create_order(db=db, order=order)
 
-    # =====================================================================
-    # ✨ [핵심 해결 위치!] 선불/후불 상관없이 주문서가 만들어지자마자 무조건 테이블 상태 변경!
-    # =====================================================================
+    # 4. 테이블 상태 업데이트 (빈 자리 -> 접수 대기)
     if created_order.table_id:
         table = db.query(models.Table).filter(models.Table.id == created_order.table_id).first()
-        if table and table.current_status != "OCCUPIED":
-            table.current_status = "OCCUPIED"
-            table.occupied_at = datetime.now()
+        if table:
+            # 이미 식사 중인 테이블의 추가 주문일 경우 덮어쓰지 않음
+            if table.current_status == "EMPTY":
+                table.current_status = "PENDING"
+                table.occupied_at = datetime.now()
             db.commit()
-    # =====================================================================
     
-    # ✨ 후불 결제(POST_PAY)인 경우 처리 로직
-    if order.is_post_pay:
-        created_order.payment_status = "DEFERRED" # 상태를 '후불 결제 대기'로 변경
+    # 5. 후불 결제(직원 주문 등) 즉시 주방 전송 로직
+    is_post = getattr(order, 'is_post_pay', False) or getattr(order, 'payment_method', '') == "POST_PAY"
+    
+    if is_post:
+        created_order.payment_status = "DEFERRED" 
         db.commit()
         db.refresh(created_order)
         
-        # PG결제를 안 하므로, 주문 즉시 주방으로 웹소켓 알림을 쏩니다!
         try:
             items_list = [{"menu_name": item.menu_name, "quantity": item.quantity, "options": item.options_desc or ""} for item in created_order.items]
             created_at_val = created_order.created_at
@@ -97,66 +100,21 @@ async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)
                 "created_at": created_at_str, 
                 "items": items_list,
                 "order_type": order.order_type,
-                "is_post_pay": True # 프론트에 후불임을 알려줌
+                "is_post_pay": True 
             }, ensure_ascii=False)
+            
             await manager.broadcast(message, store_id=int(created_order.store_id))
-        except: 
-            pass
+        except Exception as e:
+            print(f"웹소켓 브로드캐스트 에러: {e}") 
     else:
-        db.commit() # 선불일 경우 PENDING 상태 그대로 둠
+        db.commit() 
         
     return created_order
 
 
-# =========================================================
-# 📋 주문 내역 조회 및 상태 변경 (점주/관리자용)
-# =========================================================
-
-@router.get("/stores/{store_id}/orders", response_model=List[schemas.OrderResponse]) 
-def read_store_orders(store_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
-    verify_store_permission(db, current_user, store_id)
-    
-    # ✨ [수정] "DEFERRED"(후불 대기) 상태인 주문도 주방 모니터에 뜨도록 리스트에 추가!
-    orders = db.query(models.Order).filter(
-        models.Order.store_id == store_id,
-        models.Order.payment_status.in_(["PAID", "DEFERRED", "PARTIAL_CANCELLED", "CANCELLED"]),
-        models.Order.is_completed == False 
-    ).order_by(models.Order.id.asc()).all()
-
-    result = []
-    for o in orders:
-        order_data = schemas.OrderResponse.model_validate(o).model_dump()
-        order_data["table_name"] = o.table.name if o.table else "알수없음"
-        result.append(order_data)
-        
-    return result
-
-@router.patch("/orders/{order_id}/complete")
-async def complete_order(order_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
-    order = db.query(models.Order).filter(models.Order.id == order_id).first()
-    if not order: 
-        raise HTTPException(status_code=404, detail="주문을 찾을 수 없습니다.")
-        
-    verify_store_permission(db, current_user, order.store_id)
-    order.is_completed = True 
-    db.commit()
-
-    # ✨ [추가된 부분] 매장의 다른 주방 모니터에도 완료되었다고 실시간 알림 전송
-    try:
-        message = json.dumps({"type": "ORDER_COMPLETED", "order_id": order_id}, ensure_ascii=False)
-        await manager.broadcast(message, store_id=int(order.store_id))
-    except: 
-        pass
-    
-    return {"message": "Order completed"}
-
-
-# =========================================================
-# 💳 포트원(아임포트) 결제 사후 검증
-# =========================================================
-
 @router.post("/payments/complete")
 async def verify_payment(payload: schemas.PaymentVerifyRequest, db: Session = Depends(get_db)):
+    # 아임포트 선불 결제 사후 검증 로직
     clean_imp_uid = payload.imp_uid.strip()
     clean_merchant_uid = payload.merchant_uid.strip()
     
@@ -173,7 +131,6 @@ async def verify_payment(payload: schemas.PaymentVerifyRequest, db: Session = De
         return {"status": "already_paid", "message": "이미 처리된 주문입니다."}
 
     try:
-        # 1. 포트원 인증 토큰 발급
         token_res = requests.post(
             "https://api.iamport.kr/users/getToken", 
             json={"imp_key": PORTONE_API_KEY, "imp_secret": PORTONE_API_SECRET}
@@ -184,7 +141,6 @@ async def verify_payment(payload: schemas.PaymentVerifyRequest, db: Session = De
 
         payment_data = None
         
-        # 2. imp_uid로 결제 정보 조회
         res1 = requests.get(
             f"https://api.iamport.kr/payments/{clean_imp_uid}", 
             headers={"Authorization": access_token}
@@ -192,7 +148,6 @@ async def verify_payment(payload: schemas.PaymentVerifyRequest, db: Session = De
         if res1.status_code == 200: 
             payment_data = res1.json().get("response")
         
-        # 3. (혹시 실패시) merchant_uid로 결제 정보 재조회
         if not payment_data:
             res2 = requests.get(
                 f"https://api.iamport.kr/payments/find/{clean_merchant_uid}", 
@@ -204,37 +159,27 @@ async def verify_payment(payload: schemas.PaymentVerifyRequest, db: Session = De
         if not payment_data: 
             raise HTTPException(status_code=404, detail="결제 정보를 찾을 수 없습니다.")
             
-        # 4. 결제 금액 변조 확인 (매우 중요)
         if int(payment_data['amount']) != order.total_price: 
             raise HTTPException(status_code=400, detail="결제 금액 불일치 (위변조 의심)")
 
-        # 5. DB 업데이트
+        # DB에 결제 완료 기록
         order.payment_status = "PAID"
         order.imp_uid = clean_imp_uid
         order.merchant_uid = clean_merchant_uid
         order.paid_amount = payment_data['amount']
+        
+        # 선불 주문 시 테이블 상태 PENDING으로 변경
+        if order.table_id:
+            table = db.query(models.Table).filter(models.Table.id == order.table_id).first()
+            if table:
+                if table.current_status == "EMPTY":
+                    table.current_status = "PENDING"
+                    table.occupied_at = datetime.now()
         db.commit()
 
-        # =======================================================
-        # ✨ [여기에 2차 추가!] 선불 결제 완료 시 테이블을 식사 중으로 변경
-        from datetime import datetime
-        table = db.query(models.Table).filter(models.Table.id == order.table_id).first()
-        if table and table.current_status != "OCCUPIED":
-            table.current_status = "OCCUPIED"
-            table.occupied_at = datetime.now()
-            db.commit()
-        # =======================================================
-
-        # 6. 매장 POS(주문 모니터)로 웹소켓 실시간 알림 전송
+        # 주방으로 웹소켓 전송
         try:
-            items_list = [
-                {
-                    "menu_name": item.menu_name, 
-                    "quantity": item.quantity, 
-                    "options": item.options_desc or ""
-                } for item in order.items
-            ]
-            
+            items_list = [{"menu_name": item.menu_name, "quantity": item.quantity, "options": item.options_desc or ""} for item in order.items]
             created_at_val = order.created_at
             created_at_str = created_at_val.strftime("%Y-%m-%d %H:%M:%S") if hasattr(created_at_val, 'strftime') else str(created_at_val)
 
@@ -249,27 +194,151 @@ async def verify_payment(payload: schemas.PaymentVerifyRequest, db: Session = De
             }, ensure_ascii=False)
             
             await manager.broadcast(message, store_id=int(order.store_id))
-            
         except: 
-            pass # 웹소켓 전송에 실패해도 결제는 정상 완료 처리되어야 함
+            pass 
 
         return {"status": "success", "message": "완료", "daily_number": order.daily_number}
         
     except Exception as e:
-        # 치명적 오류 발생 시 디스코드로 알림
-        send_discord_alert(f"결제 검증 중 치명적 에러 발생!\n주문번호: {order_id}\n내용: {str(e)}")
+        send_discord_alert(f"결제 검증 중 에러 발생!\n주문번호: {order_id}\n내용: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# =========================================================
+# 🧑‍🍳 [그룹 2] 주방 제어 및 상태 관리 (KDS & 현황판 연동)
+# =========================================================
+
+@router.get("/stores/{store_id}/orders", response_model=List[schemas.OrderResponse]) 
+def read_store_orders(store_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
+    # 주방에서 아직 조리 완료되지 않은 주문들을 불러옴
+    verify_store_permission(db, current_user, store_id)
     
-    # =========================================================
-# 🕰️ 과거 주문 내역 조회 (결제 내역)
+    orders = db.query(models.Order).filter(
+        models.Order.store_id == store_id,
+        models.Order.payment_status.in_(["PAID", "DEFERRED", "PARTIAL_CANCELLED", "CANCELLED"]),
+        models.Order.is_completed == False 
+    ).order_by(models.Order.id.asc()).all()
+
+    result = []
+    for o in orders:
+        order_data = schemas.OrderResponse.model_validate(o).model_dump()
+        order_data["table_name"] = o.table.name if o.table else "포장/알수없음"
+        result.append(order_data)
+        
+    return result
+
+@router.patch("/orders/{order_id}/cooking")
+async def start_cooking_order(order_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
+    # 중복 제거됨: 주방에서 '조리 시작' 버튼 클릭 시
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="주문을 찾을 수 없습니다.")
+        
+    verify_store_permission(db, current_user, order.store_id)
+    
+    order.cooking_status = "COOKING"
+    
+    # 테이블 현황판 상태 동기화
+    if order.table_id:
+        table = db.query(models.Table).filter(models.Table.id == order.table_id).first()
+        if table and table.current_status == "PENDING":
+            table.current_status = "COOKING"
+            
+    db.commit()
+    
+    # 홀 현황판 즉시 갱신을 위한 웹소켓 발송
+    try:
+        await manager.broadcast(json.dumps({
+            "type": "TABLE_STATUS_CHANGED",
+            "table_id": order.table_id
+        }), store_id=int(order.store_id))
+    except Exception as e:
+        print(f"WS Error: {e}")
+        
+    return {"message": "조리가 시작되었습니다."}
+
+@router.patch("/orders/{order_id}/complete")
+async def complete_order(order_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order: 
+        raise HTTPException(status_code=404, detail="주문을 찾을 수 없습니다.")
+        
+    verify_store_permission(db, current_user, order.store_id)
+    
+    # ✨ [핵심 1] commit()을 하면 데이터가 날아갈 수 있으므로 변수에 미리 안전하게 피신시킵니다.
+    table_id = order.table_id
+    store_id = order.store_id
+    
+    # 1. 현재 주문 완료 처리 및 확정
+    order.is_completed = True 
+    order.cooking_status = "COMPLETED"
+    db.commit()
+    
+    # 2. 미완료 주문 확인 및 테이블 상태 변경
+    if table_id:
+        # ✨ [핵심 2] == False 대신 != True를 사용하여 NULL 값으로 인한 오류까지 완벽 방어합니다.
+        pending_orders = db.query(models.Order).filter(
+            models.Order.table_id == table_id,
+            models.Order.payment_status != "CANCELLED",
+            models.Order.is_completed != True ,
+            models.Order.id != order_id  # 👈 이 한 줄을 추가해 주세요!
+        ).count()
+        
+        print(f"==================================================")
+        print(f"✅ [디버그] 주문번호 {order_id}번 조리 완료 처리됨!")
+        print(f"✅ [디버그] 테이블 {table_id}번에 남은 미완료 주문 개수: {pending_orders}개")
+        
+        if pending_orders == 0:
+            table = db.query(models.Table).filter(models.Table.id == table_id).first()
+            if table:
+                table.current_status = "OCCUPIED"
+                db.commit()
+                print(f"✅ [디버그] 남은 주문이 0개이므로 테이블 상태를 '식사 중(OCCUPIED)'으로 변경했습니다!")
+        else:
+            print(f"⚠️ [디버그] 아직 {pending_orders}개의 다른 주문이 남아있어 테이블 상태를 유지합니다.")
+        print(f"==================================================")
+
+    # 3. 실시간 신호 전송
+    try:
+        await manager.broadcast(json.dumps({
+            "type": "ORDER_COMPLETED", 
+            "order_id": order_id,
+            "table_id": table_id
+        }, ensure_ascii=False), store_id=int(store_id))
+        
+        if table_id:
+            await manager.broadcast(json.dumps({
+                "type": "TABLE_STATUS_CHANGED",
+                "table_id": table_id
+            }), store_id=int(store_id))
+    except: 
+        pass
+    
+    return {"message": "조리 완료 처리되었습니다."}
+
+@router.patch("/orders/{order_id}/target-time")
+async def update_order_target_time(order_id: int, time_change: int, db: Session = Depends(get_db)):
+    # 주방 지연 시간 조정
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+        
+    new_time = order.target_time + time_change
+    if new_time < 5: new_time = 5 
+        
+    order.target_time = new_time
+    db.commit()
+    return {"message": "시간이 업데이트 되었습니다.", "target_time": new_time}
+
+
+# =========================================================
+# 🕰️ [그룹 3] 과거 주문 내역 및 정산 (히스토리)
 # =========================================================
 
 @router.get("/stores/{store_id}/orders/history", response_model=List[schemas.OrderResponse])
 def read_store_order_history(store_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
-    # 1. 권한 검사 (내 매장이 맞는지)
     verify_store_permission(db, current_user, store_id)
     
-    # 2. 해당 매장의 전체 주문 내역을 최신순(id.desc)으로 최대 100개까지 불러옵니다.
     orders = db.query(models.Order).filter(
         models.Order.store_id == store_id
     ).order_by(models.Order.id.desc()).limit(100).all()
@@ -277,39 +346,7 @@ def read_store_order_history(store_id: int, db: Session = Depends(get_db), curre
     result = []
     for o in orders:
         order_data = schemas.OrderResponse.model_validate(o).model_dump()
-        # 테이블 이름 매핑 (테이블이 삭제되었거나 포장 주문일 경우 예외 처리)
         order_data["table_name"] = o.table.name if o.table else "포장/미지정"
         result.append(order_data)
         
     return result
-
-# =========================================================
-# ✨ [신규 추가] 조리 시작 상태로 변경 API
-# =========================================================
-@router.patch("/orders/{order_id}/cooking")
-async def update_cooking_status(order_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
-    order = db.query(models.Order).filter(models.Order.id == order_id).first()
-    if not order:
-        raise HTTPException(status_code=404, detail="주문을 찾을 수 없습니다.")
-        
-    verify_store_permission(db, current_user, order.store_id)
-    
-    # 상태를 COOKING(조리중)으로 업데이트하고 저장
-    order.cooking_status = "COOKING"
-    db.commit()
-    
-    return {"message": "조리 시작 상태로 변경되었습니다."}
-
-@router.patch("/orders/{order_id}/target-time")
-async def update_order_target_time(order_id: int, time_change: int, db: Session = Depends(get_db)):
-    # time_change는 +5 또는 -5 로 들어옵니다.
-    order = db.query(models.Order).filter(models.Order.id == order_id).first()
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-        
-    new_time = order.target_time + time_change
-    if new_time < 5: new_time = 5 # 최소 조리 시간은 5분으로 제한
-        
-    order.target_time = new_time
-    db.commit()
-    return {"message": "시간이 업데이트 되었습니다.", "target_time": new_time}

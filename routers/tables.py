@@ -179,20 +179,37 @@ async def update_table_status(
 # =========================================================
 # ✨ [신규 추가] 현황판 퇴석 처리 및 QR 토큰 갱신 API
 # =========================================================
-@router.post("/tables/{table_id}/clear")
-def clear_table(table_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
+@router.post("/{table_id}/clear")
+async def clear_table(table_id: int, db: Session = Depends(get_db)):
     table = db.query(models.Table).filter(models.Table.id == table_id).first()
     if not table:
         raise HTTPException(status_code=404, detail="테이블을 찾을 수 없습니다.")
-    
-    # 1. 상태 초기화
+
+    # 🛡️ [방어 로직] 조리 중이거나 대기 중인 주문이 있는지 확인
+    pending_orders = db.query(models.Order).filter(
+        models.Order.table_id == table_id,
+        models.Order.is_completed == False,
+        models.Order.payment_status != "CANCELLED"
+    ).all()
+
+    # 만약 강제로 비우는 것이라면 주문들을 모두 취소 처리하거나 완료 처리해야 함
+    for order in pending_orders:
+        order.payment_status = "CANCELLED"  # 또는 운영 방침에 따라 처리
+        order.is_completed = True 
+
+    # 테이블 상태 초기화
     table.current_status = "EMPTY"
     table.occupied_at = None
-    
-    # 2. 핵심 보안! 이전 손님이 찍은 QR코드 무효화
-    table.qr_token = str(uuid.uuid4())[:8] 
-    
     db.commit()
+
+    # 📡 [웹소켓] 주방과 현황판에 '테이블 비워짐 + 주문 취소됨' 알림 전송
+    await manager.broadcast(json.dumps({
+        "type": "TABLE_STATUS_CHANGED",
+        "table_id": table_id,
+        "status": "EMPTY",
+        "message": "CANCEL_PENDING_ORDERS" # 주방에서 이 메시지를 받으면 해당 테이블 주문 제거
+    }), table.store_id)
+
     return {"message": "테이블이 성공적으로 비워졌습니다."}
 
 @router.get("/stores/{store_id}/tables", response_model=List[schemas.TableResponse])
