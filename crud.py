@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from models import Order, OrderItem
-import models, schemas, auth
+import models, schemas, auth, uuid
 from datetime import datetime, timedelta
 
 # =========================================================
@@ -239,3 +239,35 @@ def invalidate_virtual_session(db: Session, token: str):
         db.commit()
         return True
     return False
+
+# =========================================================
+# 🪑 테이블 방문 세션 (손님 QR 스캔 세션)
+# =========================================================
+
+def create_table_session(db: Session, table_id: int):
+    # 기존 활성 세션 모두 만료 (같은 테이블의 이전 손님 차단)
+    db.query(models.TableSession).filter(
+        models.TableSession.table_id == table_id,
+        models.TableSession.is_active == True
+    ).update({"is_active": False})
+    db.commit()
+
+    new_token = str(uuid.uuid4())
+    session = models.TableSession(table_id=table_id, session_token=new_token)
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return session
+
+def get_active_table_session(db: Session, session_token: str):
+    return db.query(models.TableSession).filter(
+        models.TableSession.session_token == session_token,
+        models.TableSession.is_active == True
+    ).first()
+
+def invalidate_table_sessions(db: Session, table_id: int):
+    db.query(models.TableSession).filter(
+        models.TableSession.table_id == table_id,
+        models.TableSession.is_active == True
+    ).update({"is_active": False})
+    db.commit()

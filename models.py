@@ -309,3 +309,13 @@ class VirtualSession(Base):
     token = Column(String, unique=True, index=True) # 1회용 UUID 토큰
     is_active = Column(Boolean, default=True)       # 결제 완료 시 False로 변경하여 즉시 파기
     created_at = Column(DateTime, default=datetime.utcnow)
+
+# ✨ 신규: 홀 테이블 방문 세션 (손님이 QR 스캔 시 발급, 퇴석 시 만료)
+class TableSession(Base):
+    __tablename__ = "table_sessions"
+    id = Column(Integer, primary_key=True, index=True)
+    table_id = Column(Integer, ForeignKey("tables.id"), index=True)
+    session_token = Column(String, unique=True, index=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    table = relationship("Table")

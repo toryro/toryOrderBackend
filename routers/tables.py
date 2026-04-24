@@ -32,16 +32,40 @@ def create_table_for_store(store_id: int, table: schemas.TableCreate, db: Sessio
 
 @router.get("/tables/by-token/{qr_token}")
 def get_table_by_token(qr_token: str, db: Session = Depends(get_db)):
+    # 테이블 정보만 반환 — 세션 생성 없음
     table = db.query(models.Table).filter(models.Table.qr_token == qr_token).first()
-    if not table: 
+    if table:
+        return {
+            "store_id": table.store_id,
+            "table_id": table.id,
+            "label": table.name,
+            "order_type_setting": table.order_type_setting,
+            "is_virtual": False,
+            "session_token": None,
+        }
+
+    # 가상 세션 토큰으로 조회 (포장 전용 1회용 링크)
+    vs = crud.get_active_virtual_session(db, token=qr_token)
+    if vs:
+        return {
+            "store_id": vs.store_id,
+            "table_id": None,
+            "label": "포장",
+            "order_type_setting": "TAKEOUT_ONLY",
+            "is_virtual": True,
+            "session_token": None,
+        }
+
+    raise HTTPException(status_code=404, detail="유효하지 않은 QR 코드입니다.")
+
+@router.post("/tables/by-token/{qr_token}/session")
+def create_session_for_table(qr_token: str, db: Session = Depends(get_db)):
+    # 처음 QR 스캔 시 한 번만 호출 — 방문 세션 발급
+    table = db.query(models.Table).filter(models.Table.qr_token == qr_token).first()
+    if not table:
         raise HTTPException(status_code=404, detail="유효하지 않은 QR 코드입니다.")
-    # ✨ order_type_setting 추가 리턴
-    return {
-        "store_id": table.store_id, 
-        "table_id": table.id, 
-        "label": table.name,
-        "order_type_setting": table.order_type_setting 
-    }
+    session = crud.create_table_session(db, table_id=table.id)
+    return {"session_token": session.session_token}
 
 @router.patch("/tables/{table_id}", response_model=schemas.TableResponse)
 def update_table(table_id: int, table_update: schemas.TableUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
@@ -179,7 +203,7 @@ async def update_table_status(
 # =========================================================
 # ✨ [신규 추가] 현황판 퇴석 처리 및 QR 토큰 갱신 API
 # =========================================================
-@router.post("/{table_id}/clear")
+@router.post("/tables/{table_id}/clear")
 async def clear_table(table_id: int, db: Session = Depends(get_db)):
     table = db.query(models.Table).filter(models.Table.id == table_id).first()
     if not table:
@@ -196,6 +220,9 @@ async def clear_table(table_id: int, db: Session = Depends(get_db)):
     for order in pending_orders:
         order.payment_status = "CANCELLED"  # 또는 운영 방침에 따라 처리
         order.is_completed = True 
+
+    # 기존 손님의 방문 세션 만료 (재주문 차단)
+    crud.invalidate_table_sessions(db, table_id)
 
     # 테이블 상태 초기화
     table.current_status = "EMPTY"
@@ -217,3 +244,32 @@ def get_tables_for_store(store_id: int, db: Session = Depends(get_db)):
     # 해당 매장의 모든 테이블을 조회해서 현황판으로 보내줍니다.
     tables = db.query(models.Table).filter(models.Table.store_id == store_id).all()
     return tables
+
+
+# =========================================================
+# 📦 가상 세션 (포장 전용 1회용 주문 링크)
+# =========================================================
+
+@router.post("/stores/{store_id}/virtual-sessions", response_model=schemas.VirtualSessionResponse)
+def create_virtual_session(
+    store_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user)
+):
+    verify_store_permission(db, current_user, store_id)
+    session = crud.create_virtual_session(db, store_id=store_id)
+    return session
+
+
+@router.delete("/virtual-sessions/{vs_token}")
+def invalidate_virtual_session(
+    vs_token: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user)
+):
+    vs = crud.get_active_virtual_session(db, token=vs_token)
+    if not vs:
+        raise HTTPException(status_code=404, detail="유효하지 않은 세션입니다.")
+    verify_store_permission(db, current_user, vs.store_id)
+    crud.invalidate_virtual_session(db, token=vs_token)
+    return {"message": "세션이 파기되었습니다."}

@@ -201,7 +201,7 @@ class StoreUpdate(BaseModel):
 
 class OrderBase(BaseModel):
     store_id: int
-    table_id: int
+    table_id: Optional[int] = None
 
 class UserBase(BaseModel):
     email: str
@@ -279,8 +279,9 @@ class OrderItemCreate(BaseModel):
 
 class OrderCreate(OrderBase):
     items: List[OrderItemCreate]
-    is_post_pay: bool = False 
-    order_type: str = "DINE_IN" # ✨ [신규 추가] 주문 시 포장/매장 여부 전달
+    is_post_pay: bool = False
+    order_type: str = "DINE_IN"
+    session_token: Optional[str] = None  # 홀 테이블 방문 세션 토큰 (퇴석 여부 검증용)
 
 class OptionResponse(OptionBase):
     id: int
@@ -333,12 +334,14 @@ class OrderResponse(OrderBase):
     total_price: int
     created_at: datetime
     is_completed: bool
-    table_name: Optional[str] = None 
+    table_name: Optional[str] = None
     items: List[OrderItem] = []
     payment_status: str
+    payment_method: Optional[str] = None
+    paid_amount: Optional[int] = 0
     cooking_status: Optional[str] = "PENDING"
     target_time: Optional[int] = 15
-    order_type: str = "DINE_IN" # ✨ [신규 추가] 응답에 포함
+    order_type: str = "DINE_IN"
     model_config = ConfigDict(from_attributes=True)
 
 class UserResponse(UserBase):
@@ -379,6 +382,7 @@ class StaffCallResponse(BaseModel):
 class PaymentVerifyRequest(BaseModel):
     imp_uid: str
     merchant_uid: str
+    virtual_session_token: Optional[str] = None
 
 class Token(BaseModel):
     access_token: str
@@ -448,4 +452,5 @@ class TableTokenResponse(BaseModel):
     store_id: int
     label: str
     order_type_setting: str
-    is_virtual: bool = False  # ✨ 이 값이 True면 프론트엔드에서 무조건 선결제로 강제!
+    is_virtual: bool = False
+    session_token: Optional[str] = None  # 홀 테이블 방문 세션 토큰

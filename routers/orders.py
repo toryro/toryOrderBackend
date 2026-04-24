@@ -15,7 +15,7 @@ from database import get_db
 from connection_manager import manager  # 웹소켓 브로드캐스트
 
 # 공통 함수 (utils.py)
-from utils import verify_store_permission, send_discord_alert
+from utils import verify_store_permission, send_discord_alert, create_audit_log
 
 # 포트원 API 키 설정 (.env 또는 환경 변수에서 로드)
 PORTONE_API_KEY = os.getenv("PORTONE_API_KEY")
@@ -66,7 +66,13 @@ async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)
         if not menu: 
             raise HTTPException(status_code=400, detail=f"잘못된 메뉴 요청입니다 (ID: {item.menu_id})")
         
-    # 3. DB에 주문 생성
+    # 3. 테이블 방문 세션 유효성 검증 (홀 주문의 경우)
+    if order.table_id and order.session_token:
+        active_session = crud.get_active_table_session(db, session_token=order.session_token)
+        if not active_session or active_session.table_id != order.table_id:
+            raise HTTPException(status_code=403, detail="SESSION_EXPIRED")
+
+    # 4. DB에 주문 생성
     created_order = crud.create_order(db=db, order=order)
 
     # 4. 테이블 상태 업데이트 (빈 자리 -> 접수 대기)
@@ -197,8 +203,12 @@ async def verify_payment(payload: schemas.PaymentVerifyRequest, db: Session = De
         except: 
             pass 
 
+        # 포장 가상 세션 결제 완료 → 1회용 토큰 즉시 파기
+        if payload.virtual_session_token:
+            crud.invalidate_virtual_session(db, token=payload.virtual_session_token)
+
         return {"status": "success", "message": "완료", "daily_number": order.daily_number}
-        
+
     except Exception as e:
         send_discord_alert(f"결제 검증 중 에러 발생!\n주문번호: {order_id}\n내용: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -334,6 +344,117 @@ async def update_order_target_time(order_id: int, time_change: int, db: Session 
 # =========================================================
 # 🕰️ [그룹 3] 과거 주문 내역 및 정산 (히스토리)
 # =========================================================
+
+@router.post("/orders/{order_id}/cancel")
+async def cancel_order(
+    order_id: int,
+    cancel_req: schemas.OrderCancelRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user)
+):
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="주문을 찾을 수 없습니다.")
+
+    verify_store_permission(db, current_user, order.store_id)
+
+    if order.payment_status == "CANCELLED":
+        raise HTTPException(status_code=400, detail="이미 취소된 주문입니다.")
+
+    is_partial = len(cancel_req.cancelled_item_ids) > 0
+
+    # 부분 취소: 대상 항목 확인 및 환불액 산정
+    if is_partial:
+        items_to_cancel = db.query(models.OrderItem).filter(
+            models.OrderItem.id.in_(cancel_req.cancelled_item_ids),
+            models.OrderItem.order_id == order_id,
+            models.OrderItem.is_cancelled == False
+        ).all()
+
+        if not items_to_cancel:
+            raise HTTPException(status_code=400, detail="취소할 항목이 없습니다. 이미 취소된 항목이거나 잘못된 ID입니다.")
+
+        refund_amount = cancel_req.amount or sum(item.price * item.quantity for item in items_to_cancel)
+    else:
+        # 전체 취소: 잔여 결제 금액 전액 환불
+        refund_amount = cancel_req.amount or order.paid_amount or order.total_price
+
+    # PortOne 결제 건인 경우 실제 환불 API 호출
+    if order.imp_uid and order.payment_status in ["PAID", "PARTIAL_CANCELLED"]:
+        try:
+            token_res = requests.post(
+                "https://api.iamport.kr/users/getToken",
+                json={"imp_key": PORTONE_API_KEY, "imp_secret": PORTONE_API_SECRET}
+            )
+            if token_res.status_code != 200:
+                raise HTTPException(status_code=500, detail="PG사 토큰 발급 실패")
+            access_token = token_res.json()["response"]["access_token"]
+
+            cancel_payload = {
+                "imp_uid": order.imp_uid,
+                "reason": cancel_req.reason,
+                "amount": refund_amount,
+                "checksum": order.paid_amount,  # 현재 환불 가능 잔액
+            }
+
+            cancel_res = requests.post(
+                "https://api.iamport.kr/payments/cancel",
+                headers={"Authorization": access_token},
+                json=cancel_payload
+            )
+            cancel_data = cancel_res.json()
+
+            if cancel_res.status_code != 200 or cancel_data.get("code") != 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"환불 처리 실패: {cancel_data.get('message', '알 수 없는 오류')}"
+                )
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            send_discord_alert(f"환불 처리 중 오류!\n주문번호: {order_id}\n내용: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"환불 처리 중 오류: {str(e)}")
+
+    # DB 상태 업데이트
+    if is_partial:
+        for item in items_to_cancel:
+            item.is_cancelled = True
+        order.paid_amount = max(0, (order.paid_amount or 0) - refund_amount)
+        order.payment_status = "PARTIAL_CANCELLED"
+    else:
+        for item in order.items:
+            item.is_cancelled = True
+        order.payment_status = "CANCELLED"
+        order.paid_amount = 0
+        order.is_completed = True
+
+    db.commit()
+
+    create_audit_log(
+        db, current_user.id,
+        "PARTIAL_CANCEL" if is_partial else "CANCEL",
+        "Order", order_id,
+        f"사유: {cancel_req.reason}, 환불금액: {refund_amount}원"
+    )
+
+    # WebSocket 브로드캐스트
+    try:
+        await manager.broadcast(json.dumps({
+            "type": "ORDER_CANCELLED",
+            "order_id": order_id,
+            "is_partial": is_partial,
+            "table_id": order.table_id
+        }, ensure_ascii=False), store_id=int(order.store_id))
+    except Exception as e:
+        print(f"WS Error: {e}")
+
+    return {
+        "message": "부분 취소 완료" if is_partial else "주문 취소 완료",
+        "refund_amount": refund_amount,
+        "payment_status": order.payment_status
+    }
+
 
 @router.get("/stores/{store_id}/orders/history", response_model=List[schemas.OrderResponse])
 def read_store_order_history(store_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
