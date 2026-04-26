@@ -82,6 +82,18 @@ class Store(Base):
     auto_kitchen_print = Column(Boolean, default=False)
     allow_staff_order = Column(Boolean, default=True)
 
+    # 영수증 프린터 (Printer 1) 연결 설정
+    receipt_printer_type = Column(String, default="FILE")   # NETWORK, SERIAL, FILE
+    receipt_printer_host = Column(String, default="")        # 네트워크: IP 주소
+    receipt_printer_port = Column(String, default="9100")    # 네트워크: 포트 / 시리얼: COM3 등
+    receipt_printer_baud = Column(Integer, default=9600)     # 시리얼 전송속도
+
+    # 주방 프린터 (Printer 2) 연결 설정
+    kitchen_printer_type = Column(String, default="FILE")
+    kitchen_printer_host = Column(String, default="")
+    kitchen_printer_port = Column(String, default="9100")
+    kitchen_printer_baud = Column(Integer, default=9600)
+
 # ⚠️ 2그룹: 예외 (관리자 때문에 nullable=True 유지)
 class User(Base):
     __tablename__ = "users"
@@ -176,15 +188,16 @@ class MenuOptionLink(Base):
 class Table(Base):
     __tablename__ = "tables"
     id = Column(Integer, primary_key=True, index=True)
-    store_id = Column(Integer, ForeignKey("stores.id"), index=True, nullable=False) # 🔥 수정됨
+    store_id = Column(Integer, ForeignKey("stores.id"), index=True, nullable=False)
     name = Column(String)
     qr_token = Column(String, unique=True, index=True)
     order_type_setting = Column(String, default="SELECTABLE") # 'SELECTABLE', 'DINE_IN_ONLY', 'TAKEOUT_ONLY'
-    
+    table_type = Column(String, default="DINE_IN")  # 'DINE_IN' | 'TAKEOUT_COUNTER'
+
     store = relationship("Store", back_populates="tables")
     orders = relationship("Order", back_populates="table")
     staff_calls = relationship("StaffCall", back_populates="table")
-    current_status = Column(String, default="EMPTY") 
+    current_status = Column(String, default="EMPTY")
     occupied_at = Column(DateTime, nullable=True)
 
 class CallOption(Base):
@@ -319,3 +332,14 @@ class TableSession(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     table = relationship("Table")
+
+
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    token = Column(String, unique=True, index=True, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    is_used = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    user = relationship("User")

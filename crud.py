@@ -134,7 +134,13 @@ def create_option(db: Session, option: schemas.OptionCreate, group_id: int, stor
 def create_table(db: Session, table: schemas.TableCreate, store_id: int):
     import uuid
     token = str(uuid.uuid4())
-    db_table = models.Table(name=table.name, qr_token=token, store_id=store_id)
+    db_table = models.Table(
+        name=table.name,
+        qr_token=token,
+        store_id=store_id,
+        table_type=table.table_type,
+        order_type_setting="TAKEOUT_ONLY" if table.table_type == "TAKEOUT_COUNTER" else table.order_type_setting,
+    )
     db.add(db_table)
     db.commit()
     db.refresh(db_table)
@@ -245,12 +251,16 @@ def invalidate_virtual_session(db: Session, token: str):
 # =========================================================
 
 def create_table_session(db: Session, table_id: int):
-    # 기존 활성 세션 모두 만료 (같은 테이블의 이전 손님 차단)
-    db.query(models.TableSession).filter(
-        models.TableSession.table_id == table_id,
-        models.TableSession.is_active == True
-    ).update({"is_active": False})
-    db.commit()
+    table = db.query(models.Table).filter(models.Table.id == table_id).first()
+    is_takeout_counter = table and table.table_type == "TAKEOUT_COUNTER"
+
+    if not is_takeout_counter:
+        # 홀 테이블: 기존 활성 세션 모두 만료 (이전 손님 차단)
+        db.query(models.TableSession).filter(
+            models.TableSession.table_id == table_id,
+            models.TableSession.is_active == True
+        ).update({"is_active": False})
+        db.commit()
 
     new_token = str(uuid.uuid4())
     session = models.TableSession(table_id=table_id, session_token=new_token)
@@ -268,6 +278,13 @@ def get_active_table_session(db: Session, session_token: str):
 def invalidate_table_sessions(db: Session, table_id: int):
     db.query(models.TableSession).filter(
         models.TableSession.table_id == table_id,
+        models.TableSession.is_active == True
+    ).update({"is_active": False})
+    db.commit()
+
+def invalidate_table_session_by_token(db: Session, session_token: str):
+    db.query(models.TableSession).filter(
+        models.TableSession.session_token == session_token,
         models.TableSession.is_active == True
     ).update({"is_active": False})
     db.commit()

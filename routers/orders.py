@@ -174,10 +174,10 @@ async def verify_payment(payload: schemas.PaymentVerifyRequest, db: Session = De
         order.merchant_uid = clean_merchant_uid
         order.paid_amount = payment_data['amount']
         
-        # 선불 주문 시 테이블 상태 PENDING으로 변경
+        # 선불 주문 시 테이블 상태 PENDING으로 변경 (포장 카운터는 제외)
         if order.table_id:
             table = db.query(models.Table).filter(models.Table.id == order.table_id).first()
-            if table:
+            if table and table.table_type != "TAKEOUT_COUNTER":
                 if table.current_status == "EMPTY":
                     table.current_status = "PENDING"
                     table.occupied_at = datetime.now()
@@ -190,28 +190,85 @@ async def verify_payment(payload: schemas.PaymentVerifyRequest, db: Session = De
             created_at_str = created_at_val.strftime("%Y-%m-%d %H:%M:%S") if hasattr(created_at_val, 'strftime') else str(created_at_val)
 
             message = json.dumps({
-                "type": "NEW_ORDER", 
-                "order_id": order.id, 
+                "type": "NEW_ORDER",
+                "order_id": order.id,
                 "daily_number": order.daily_number,
-                "table_name": order.table.name if order.table else "Unknown", 
-                "created_at": created_at_str, 
+                "table_name": order.table.name if order.table else "Unknown",
+                "created_at": created_at_str,
                 "order_type": order.order_type,
                 "items": items_list
             }, ensure_ascii=False)
-            
+
             await manager.broadcast(message, store_id=int(order.store_id))
-        except: 
-            pass 
+        except:
+            pass
 
         # 포장 가상 세션 결제 완료 → 1회용 토큰 즉시 파기
         if payload.virtual_session_token:
             crud.invalidate_virtual_session(db, token=payload.virtual_session_token)
+
+        # 포장 카운터 세션 결제 완료 → 해당 세션만 파기
+        if payload.session_token:
+            crud.invalidate_table_session_by_token(db, session_token=payload.session_token)
+
+        # 영수증 자동 출력 (has_pos=False + 프린터 설정된 경우)
+        store = db.query(models.Store).filter(models.Store.id == order.store_id).first()
+        if store:
+            from routers.printer import try_auto_print_receipt
+            try_auto_print_receipt(order, store)
 
         return {"status": "success", "message": "완료", "daily_number": order.daily_number}
 
     except Exception as e:
         send_discord_alert(f"결제 검증 중 에러 발생!\n주문번호: {order_id}\n내용: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# =========================================================
+# 💴 후불 수납 처리
+# =========================================================
+
+@router.patch("/orders/{order_id}/collect-payment")
+async def collect_payment(
+    order_id: int,
+    req: schemas.CollectPaymentRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user),
+):
+    """후불 주문 수납 처리 (DEFERRED → PAID). 이미 PAID면 멱등 처리."""
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="주문을 찾을 수 없습니다.")
+
+    verify_store_permission(db, current_user, order.store_id)
+
+    if order.payment_status == "PAID":
+        return {"message": "이미 수납된 주문입니다.", "payment_method": order.payment_method}
+
+    if order.payment_status not in ("DEFERRED",):
+        raise HTTPException(status_code=400, detail="후불(미수납) 주문만 수납 처리할 수 있습니다.")
+
+    order.payment_status = "PAID"
+    order.payment_method = req.payment_method
+    order.paid_amount = order.total_price
+    db.commit()
+
+    try:
+        await manager.broadcast(json.dumps({
+            "type": "PAYMENT_COLLECTED",
+            "order_id": order_id,
+            "table_id": order.table_id,
+        }), store_id=int(order.store_id))
+    except:
+        pass
+
+    # 영수증 자동 출력 (has_pos=False + 프린터 설정된 경우)
+    store = db.query(models.Store).filter(models.Store.id == order.store_id).first()
+    if store:
+        from routers.printer import try_auto_print_receipt
+        try_auto_print_receipt(order, store)
+
+    return {"message": "수납이 완료되었습니다.", "payment_method": req.payment_method}
 
 
 # =========================================================

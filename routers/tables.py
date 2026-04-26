@@ -32,14 +32,14 @@ def create_table_for_store(store_id: int, table: schemas.TableCreate, db: Sessio
 
 @router.get("/tables/by-token/{qr_token}")
 def get_table_by_token(qr_token: str, db: Session = Depends(get_db)):
-    # 테이블 정보만 반환 — 세션 생성 없음
     table = db.query(models.Table).filter(models.Table.qr_token == qr_token).first()
     if table:
         return {
             "store_id": table.store_id,
             "table_id": table.id,
             "label": table.name,
-            "order_type_setting": table.order_type_setting,
+            "order_type_setting": "TAKEOUT_ONLY" if table.table_type == "TAKEOUT_COUNTER" else table.order_type_setting,
+            "table_type": table.table_type,
             "is_virtual": False,
             "session_token": None,
         }
@@ -52,6 +52,7 @@ def get_table_by_token(qr_token: str, db: Session = Depends(get_db)):
             "table_id": None,
             "label": "포장",
             "order_type_setting": "TAKEOUT_ONLY",
+            "table_type": "DINE_IN",
             "is_virtual": True,
             "session_token": None,
         }

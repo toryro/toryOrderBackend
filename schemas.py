@@ -123,7 +123,8 @@ class CategoryBase(BaseModel):
 # ✨ [수정됨] 테이블 기본 스키마에 포장/매장 설정 추가
 class TableBase(BaseModel):
     name: str
-    order_type_setting: Optional[str] = "SELECTABLE" # 'SELECTABLE', 'DINE_IN_ONLY', 'TAKEOUT_ONLY'
+    order_type_setting: Optional[str] = "SELECTABLE"  # 'SELECTABLE', 'DINE_IN_ONLY', 'TAKEOUT_ONLY'
+    table_type: str = "DINE_IN"  # 'DINE_IN' | 'TAKEOUT_COUNTER'
 
 class GroupBase(BaseModel):
     name: str
@@ -167,6 +168,15 @@ class StoreBase(BaseModel):
     auto_kitchen_print: Optional[bool] = False
     allow_staff_order: Optional[bool] = True
 
+    receipt_printer_type: Optional[str] = "FILE"
+    receipt_printer_host: Optional[str] = ""
+    receipt_printer_port: Optional[str] = "9100"
+    receipt_printer_baud: Optional[int] = 9600
+    kitchen_printer_type: Optional[str] = "FILE"
+    kitchen_printer_host: Optional[str] = ""
+    kitchen_printer_port: Optional[str] = "9100"
+    kitchen_printer_baud: Optional[int] = 9600
+
 class StoreCreate(StoreBase):
     group_id: Optional[int] = None 
 
@@ -194,10 +204,19 @@ class StoreUpdate(BaseModel):
     payment_policy: str = "PRE_PAY"
     use_table_board: bool = True
     use_menu_detail: bool = False #상세페이지 사용 여부
-    has_pos: Optional[bool] = None  # 관리자 페이지에서 토글할 수 있도록 추가
+    has_pos: Optional[bool] = None
     printer_config: Optional[str] = None
     auto_kitchen_print: Optional[bool] = None
     allow_staff_order: Optional[bool] = None
+
+    receipt_printer_type: Optional[str] = None
+    receipt_printer_host: Optional[str] = None
+    receipt_printer_port: Optional[str] = None
+    receipt_printer_baud: Optional[int] = None
+    kitchen_printer_type: Optional[str] = None
+    kitchen_printer_host: Optional[str] = None
+    kitchen_printer_port: Optional[str] = None
+    kitchen_printer_baud: Optional[int] = None
 
 class OrderBase(BaseModel):
     store_id: int
@@ -312,11 +331,12 @@ class TableResponse(TableBase):
     id: int
     store_id: int
     qr_token: Optional[str] = None
-    order_type_setting: str 
+    order_type_setting: str
+    table_type: str = "DINE_IN"
     current_status: str = "EMPTY"
-    occupied_at: Optional[datetime] = None  # ✨ str을 datetime으로 변경!
+    occupied_at: Optional[datetime] = None
     model_config = ConfigDict(from_attributes=True)
-    is_virtual: bool = False # ✨ 가상 세션 여부 플래그
+    is_virtual: bool = False
 
 
 class OrderItem(BaseModel):
@@ -383,6 +403,10 @@ class PaymentVerifyRequest(BaseModel):
     imp_uid: str
     merchant_uid: str
     virtual_session_token: Optional[str] = None
+    session_token: Optional[str] = None  # 포장 카운터 세션 결제 완료 후 파기용
+
+class CollectPaymentRequest(BaseModel):
+    payment_method: str  # "card" | "cash" | "POS" | "기타"
 
 class Token(BaseModel):
     access_token: str
@@ -390,6 +414,13 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     email: Optional[str] = None
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
 
 # [순환 참조 방지]
 class StoreResponse(StoreBase):

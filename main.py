@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, UploadFile, File, WebSocket, WebSocketDisconnect, Query, status
+from fastapi import FastAPI, Request, UploadFile, File, WebSocket, WebSocketDisconnect, Query, status, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from jose import jwt
@@ -13,9 +13,10 @@ from database import engine, SessionLocal
 from connection_manager import manager
 import models, crud
 import auth  # 루트 디렉토리의 auth.py (JWT 설정용)
+import dependencies
 
 # ✨ 라우터들 임포트 (auth 라우터는 내부 모듈과 이름이 겹치지 않게 별칭 사용)
-from routers import auth as auth_router, stores, menus, orders, tables, system
+from routers import auth as auth_router, stores, menus, orders, tables, system, printer as printer_router
 
 # DB 테이블 자동 생성
 models.Base.metadata.create_all(bind=engine)
@@ -36,12 +37,27 @@ app.mount("/images", StaticFiles(directory="uploads"), name="images")
 # =========================================================
 # 📸 파일 업로드 API
 # =========================================================
+_ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+_MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
+
 @app.post("/upload/")
-async def upload_image(request: Request, file: UploadFile = File(...)):
-    filename = f"{uuid.uuid4()}_{file.filename}"
-    file_path = f"uploads/{filename}"
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+async def upload_image(
+    request: Request,
+    file: UploadFile = File(...),
+    current_user: models.User = Depends(dependencies.get_current_user),
+):
+    if file.content_type not in _ALLOWED_IMAGE_TYPES:
+        raise HTTPException(status_code=400, detail="이미지 파일만 업로드 가능합니다. (JPEG, PNG, WebP, GIF)")
+
+    contents = await file.read()
+    if len(contents) > _MAX_FILE_SIZE:
+        raise HTTPException(status_code=400, detail="파일 크기는 5MB 이하여야 합니다.")
+
+    ext = file.filename.rsplit(".", 1)[-1].lower() if file.filename and "." in file.filename else "jpg"
+    filename = f"{uuid.uuid4()}.{ext}"
+    with open(f"uploads/{filename}", "wb") as buffer:
+        buffer.write(contents)
+
     return {"url": f"{str(request.base_url).rstrip('/')}/images/{filename}"}
 
 # =========================================================
@@ -119,3 +135,4 @@ app.include_router(menus.router)
 app.include_router(orders.router)
 app.include_router(tables.router)
 app.include_router(system.router)
+app.include_router(printer_router.router)

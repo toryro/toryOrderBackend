@@ -334,7 +334,7 @@ def get_store_stats(store_id: int, start_date: str, end_date: str, db: Session =
     # 집계 데이터 초기화
     WEEKDAY_NAMES = ["월", "화", "수", "목", "금", "토", "일"]
     menu_data           = {}
-    hourly_data         = {f"{i:02d}": 0 for i in range(24)}
+    hourly_data         = {f"{i:02d}": {"sales": 0, "count": 0} for i in range(24)}
     daily_data          = {}
     monthly_data        = {}
     weekday_data        = {i: {"sales": 0, "count": 0} for i in range(7)}
@@ -354,28 +354,35 @@ def get_store_stats(store_id: int, start_date: str, end_date: str, db: Session =
             order_month = created.strftime("%Y-%m")
             weekday_idx = created.weekday()  # 0=월 … 6=일
 
-            hourly_data[order_hour] += order.total_price
+            is_paid = order.payment_status in ["PAID", "PARTIAL_CANCELLED"]
+            order_revenue = (order.paid_amount or order.total_price) if is_paid else 0
 
-            daily_data.setdefault(d_part, {"sales": 0, "count": 0})
-            daily_data[d_part]["sales"] += order.total_price
-            daily_data[d_part]["count"] += 1
+            # 매출/건수 집계는 결제완료 주문만
+            if is_paid:
+                hourly_data[order_hour]["sales"] += order_revenue
+                hourly_data[order_hour]["count"] += 1
 
-            monthly_data.setdefault(order_month, {"sales": 0, "count": 0})
-            monthly_data[order_month]["sales"] += order.total_price
-            monthly_data[order_month]["count"] += 1
+                daily_data.setdefault(d_part, {"sales": 0, "count": 0})
+                daily_data[d_part]["sales"] += order_revenue
+                daily_data[d_part]["count"] += 1
 
-            weekday_data[weekday_idx]["sales"] += order.total_price
-            weekday_data[weekday_idx]["count"] += 1
+                monthly_data.setdefault(order_month, {"sales": 0, "count": 0})
+                monthly_data[order_month]["sales"] += order_revenue
+                monthly_data[order_month]["count"] += 1
 
+                weekday_data[weekday_idx]["sales"] += order_revenue
+                weekday_data[weekday_idx]["count"] += 1
+
+                otype = order.order_type or "DINE_IN"
+                order_type_data.setdefault(otype, {"count": 0, "revenue": 0})
+                order_type_data[otype]["count"] += 1
+                order_type_data[otype]["revenue"] += order_revenue
+
+            # 결제수단: 후불 포함 (미수금 추적용)
             method = "후불" if order.payment_status == "DEFERRED" else (order.payment_method or "기타")
             payment_method_data.setdefault(method, {"count": 0, "revenue": 0})
             payment_method_data[method]["count"] += 1
-            payment_method_data[method]["revenue"] += order.total_price
-
-            otype = order.order_type or "DINE_IN"
-            order_type_data.setdefault(otype, {"count": 0, "revenue": 0})
-            order_type_data[otype]["count"] += 1
-            order_type_data[otype]["revenue"] += order.total_price
+            payment_method_data[method]["revenue"] += order_revenue
 
             for item in order.items:
                 if item.is_cancelled:
@@ -386,26 +393,37 @@ def get_store_stats(store_id: int, start_date: str, end_date: str, db: Session =
         except Exception:
             pass
 
+    def _avg(sales, count):
+        return int(sales / count) if count > 0 else 0
+
+    average_order_value  = _avg(total_revenue, order_count)
+    prev_avg_order_value = _avg(prev_revenue, prev_count)
+    aov_growth_rate      = round(((average_order_value - prev_avg_order_value) / prev_avg_order_value) * 100, 1) if prev_avg_order_value > 0 else None
+    count_growth_rate    = round(((order_count - prev_count) / prev_count) * 100, 1) if prev_count > 0 else None
+
     menu_stats           = sorted([{"name": k, "count": v["count"], "revenue": v["revenue"]} for k, v in menu_data.items()], key=lambda x: x["revenue"], reverse=True)
-    payment_method_stats = [{"method": k, "count": v["count"], "revenue": v["revenue"]} for k, v in payment_method_data.items()]
-    order_type_stats     = [{"type": k, "count": v["count"], "revenue": v["revenue"]} for k, v in order_type_data.items()]
-    weekday_stats        = [{"weekday": WEEKDAY_NAMES[i], "weekday_index": i, "sales": weekday_data[i]["sales"], "count": weekday_data[i]["count"]} for i in range(7)]
+    payment_method_stats = [{"method": k, "count": v["count"], "revenue": v["revenue"], "avg_order_value": _avg(v["revenue"], v["count"])} for k, v in payment_method_data.items()]
+    order_type_stats     = [{"type": k, "count": v["count"], "revenue": v["revenue"], "avg_order_value": _avg(v["revenue"], v["count"])} for k, v in order_type_data.items()]
+    weekday_stats        = [{"weekday": WEEKDAY_NAMES[i], "weekday_index": i, "sales": weekday_data[i]["sales"], "count": weekday_data[i]["count"], "avg_order_value": _avg(weekday_data[i]["sales"], weekday_data[i]["count"])} for i in range(7)]
 
     return {
-        "total_revenue":       total_revenue,
-        "deferred_revenue":    deferred_revenue,
-        "cancelled_count":     cancelled_count,
-        "refund_amount":       refund_amount,
-        "order_count":         order_count,
-        "average_order_value": int(total_revenue / order_count) if order_count > 0 else 0,
-        "prev_period_revenue": prev_revenue,
-        "prev_period_count":   prev_count,
-        "growth_rate":         growth_rate,
-        "menu_stats":          menu_stats,
-        "hourly_stats":        [{"hour": k, "sales": v} for k, v in hourly_data.items()],
-        "daily_stats":         [{"date": k, "sales": v["sales"], "count": v["count"]} for k, v in sorted(daily_data.items(), reverse=True)],
-        "monthly_stats":       [{"month": k, "sales": v["sales"], "count": v["count"]} for k, v in sorted(monthly_data.items(), reverse=True)],
-        "weekday_stats":       weekday_stats,
+        "total_revenue":        total_revenue,
+        "deferred_revenue":     deferred_revenue,
+        "cancelled_count":      cancelled_count,
+        "refund_amount":        refund_amount,
+        "order_count":          order_count,
+        "average_order_value":  average_order_value,
+        "prev_period_revenue":  prev_revenue,
+        "prev_period_count":    prev_count,
+        "prev_avg_order_value": prev_avg_order_value,
+        "growth_rate":          growth_rate,
+        "aov_growth_rate":      aov_growth_rate,
+        "count_growth_rate":    count_growth_rate,
+        "menu_stats":           menu_stats,
+        "hourly_stats":         [{"hour": k, "sales": v["sales"], "count": v["count"], "avg_order_value": _avg(v["sales"], v["count"])} for k, v in hourly_data.items()],
+        "daily_stats":          [{"date": k, "sales": v["sales"], "count": v["count"], "avg_order_value": _avg(v["sales"], v["count"])} for k, v in sorted(daily_data.items(), reverse=True)],
+        "monthly_stats":        [{"month": k, "sales": v["sales"], "count": v["count"], "avg_order_value": _avg(v["sales"], v["count"])} for k, v in sorted(monthly_data.items(), reverse=True)],
+        "weekday_stats":        weekday_stats,
         "payment_method_stats": payment_method_stats,
-        "order_type_stats":    order_type_stats,
+        "order_type_stats":     order_type_stats,
     }
