@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from jose import jwt
 from dotenv import load_dotenv
-import os, uuid, shutil
+import os, uuid, shutil, asyncio
 
 # 환경변수 로드
 load_dotenv()
@@ -22,6 +22,15 @@ from routers import auth as auth_router, stores, menus, orders, tables, system, 
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="ToryOrder API")
+
+async def _heartbeat_loop():
+    while True:
+        await asyncio.sleep(30)
+        await manager.ping_all()
+
+@app.on_event("startup")
+async def start_heartbeat():
+    asyncio.create_task(_heartbeat_loop())
 
 app.add_middleware(
     CORSMiddleware,
