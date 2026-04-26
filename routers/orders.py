@@ -252,6 +252,7 @@ async def collect_payment(
     order.payment_method = req.payment_method
     order.paid_amount = order.total_price
     db.commit()
+    create_audit_log(db=db, user_id=current_user.id, action="COLLECT_PAYMENT", target_type="ORDER", target_id=order_id, details=f"후불 수납 완료: 주문#{order.daily_number} {order.total_price:,}원 ({req.payment_method})")
 
     try:
         await manager.broadcast(json.dumps({
@@ -514,17 +515,37 @@ async def cancel_order(
 
 
 @router.get("/stores/{store_id}/orders/history", response_model=List[schemas.OrderResponse])
-def read_store_order_history(store_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
+def read_store_order_history(
+    store_id: int,
+    start_date: str = None,
+    end_date: str = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user),
+):
+    from datetime import datetime as dt, timedelta
     verify_store_permission(db, current_user, store_id)
-    
-    orders = db.query(models.Order).filter(
-        models.Order.store_id == store_id
-    ).order_by(models.Order.id.desc()).limit(100).all()
 
+    store = db.query(models.Store).filter(models.Store.id == store_id).first()
+    closing_hour = int(store.closing_hour or 0) if store else 0
+
+    q = db.query(models.Order).filter(models.Order.store_id == store_id)
+
+    if start_date and end_date:
+        start_dt = dt.strptime(start_date, "%Y-%m-%d").replace(hour=closing_hour, minute=0, second=0)
+        end_dt   = dt.strptime(end_date,   "%Y-%m-%d").replace(hour=closing_hour, minute=0, second=0) + timedelta(days=1)
+        q = q.filter(models.Order.created_at >= start_dt, models.Order.created_at < end_dt)
+        q = q.order_by(models.Order.id.desc()).limit(500)
+    else:
+        # 날짜 미지정 시 오늘 영업일만 반환
+        today = dt.now().replace(hour=closing_hour, minute=0, second=0)
+        if dt.now().hour < closing_hour:
+            today -= timedelta(days=1)
+        q = q.filter(models.Order.created_at >= today).order_by(models.Order.id.desc())
+
+    orders = q.all()
     result = []
     for o in orders:
         order_data = schemas.OrderResponse.model_validate(o).model_dump()
         order_data["table_name"] = o.table.name if o.table else "포장/미지정"
         result.append(order_data)
-        
     return result

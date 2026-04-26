@@ -127,11 +127,13 @@ def update_store_info(store_id: int, store_update: schemas.StoreUpdate, db: Sess
     if not store: 
         raise HTTPException(status_code=404, detail="매장을 찾을 수 없습니다.")
         
-    for key, value in store_update.dict(exclude_unset=True).items(): 
+    changed_fields = [k for k, v in store_update.dict(exclude_unset=True).items() if getattr(store, k, None) != v]
+    for key, value in store_update.dict(exclude_unset=True).items():
         setattr(store, key, value)
-        
+
     db.commit()
     db.refresh(store)
+    create_audit_log(db=db, user_id=current_user.id, action="UPDATE_STORE", target_type="STORE", target_id=store.id, details=f"매장 정보 수정: [{store.name}] 변경 항목: {', '.join(changed_fields)}")
     return store
 
 
@@ -228,6 +230,7 @@ def distribute_menu(req: schemas.MenuDistributeRequest, db: Session = Depends(ge
                     db.add(models.MenuOptionLink(menu_id=target_menu.id, option_group_id=target_og.id, order_index=link.order_index))
             db.commit()
             
+    create_audit_log(db=db, user_id=current_user.id, action="DISTRIBUTE_MENU", target_type="CATEGORY", target_id=req.source_category_id, details=f"메뉴 일괄 배포: [{source_category.name}] → {len(req.target_store_ids)}개 매장 (신규 {success_count}개, 업데이트 {update_count}개)")
     return {"message": f"배포 완료! (신규추가: {success_count}개, 업데이트: {update_count}개)"}
 
 

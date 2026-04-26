@@ -8,6 +8,7 @@ import models
 import schemas
 import dependencies
 from database import get_db
+from utils import create_audit_log
 
 # ✨ 라우터 생성
 router = APIRouter(tags=["System & Notices"])
@@ -17,17 +18,19 @@ router = APIRouter(tags=["System & Notices"])
 # =========================================================
 
 @router.post("/admin/notices")
-def create_notice(notice: schemas.NoticeCreate, db: Session = Depends(get_db)):
-    # 시스템 관리자 또는 본사에서 공지사항을 발송
+def create_notice(notice: schemas.NoticeCreate, db: Session = Depends(get_db), current_user: models.User = Depends(dependencies.get_current_user)):
+    if current_user.role not in [models.UserRole.SUPER_ADMIN, models.UserRole.BRAND_ADMIN]:
+        raise HTTPException(status_code=403, detail="공지 발송 권한이 없습니다.")
     new_notice = models.Notice(
-        title=notice.title, 
-        content=notice.content, 
-        target_type=notice.target_type, 
-        target_brand_id=notice.target_brand_id, 
+        title=notice.title,
+        content=notice.content,
+        target_type=notice.target_type,
+        target_brand_id=notice.target_brand_id,
         target_store_id=notice.target_store_id
     )
     db.add(new_notice)
     db.commit()
+    create_audit_log(db=db, user_id=current_user.id, action="SEND_NOTICE", target_type="NOTICE", target_id=new_notice.id, details=f"공지 발송: [{notice.title}] 대상: {notice.target_type}")
     return {"message": "발송 완료"}
 
 @router.get("/notices/unread")

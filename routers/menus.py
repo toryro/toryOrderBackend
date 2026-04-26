@@ -48,10 +48,12 @@ def delete_category(category_id: int, db: Session = Depends(get_db), current_use
     category = db.query(models.Category).filter(models.Category.id == category_id).first()
     if not category: raise HTTPException(status_code=404, detail="카테고리를 찾을 수 없습니다.")
     verify_store_permission(db, current_user, category.store_id)
-    
+
+    menu_count = db.query(models.Menu).filter(models.Menu.category_id == category_id).count()
     db.query(models.Menu).filter(models.Menu.category_id == category_id).delete()
     db.delete(category)
     db.commit()
+    create_audit_log(db=db, user_id=current_user.id, action="DELETE_CATEGORY", target_type="CATEGORY", target_id=category_id, details=f"카테고리 삭제: [{category.name}] (포함 메뉴 {menu_count}개 함께 삭제)")
     return {"message": "카테고리가 삭제되었습니다."}
 
 
@@ -77,16 +79,23 @@ def update_menu(menu_id: int, menu_update: schemas.MenuUpdate, db: Session = Dep
     menu = db.query(models.Menu).filter(models.Menu.id == menu_id).first()
     if not menu: raise HTTPException(status_code=404, detail="메뉴를 찾을 수 없습니다.")
     verify_store_permission(db, current_user, menu.store_id)
-    
+
     if current_user.role in [models.UserRole.STORE_OWNER, models.UserRole.STAFF]:
         if menu.is_price_fixed and menu_update.price is not None and menu_update.price != menu.price:
             raise HTTPException(status_code=403, detail="본사에서 강제 고정한 메뉴이므로 점주가 임의로 가격을 변경할 수 없습니다.")
-            
-    for key, value in menu_update.dict(exclude_unset=True).items(): 
+
+    old_price = menu.price
+    for key, value in menu_update.dict(exclude_unset=True).items():
         setattr(menu, key, value)
-        
+
     db.commit()
     db.refresh(menu)
+
+    if menu_update.price is not None and menu_update.price != old_price:
+        create_audit_log(db=db, user_id=current_user.id, action="UPDATE_MENU_PRICE", target_type="MENU", target_id=menu.id, details=f"가격 변경: [{menu.name}] {old_price:,}원 → {menu.price:,}원")
+    else:
+        create_audit_log(db=db, user_id=current_user.id, action="UPDATE_MENU", target_type="MENU", target_id=menu.id, details=f"메뉴 수정: [{menu.name}]")
+
     return menu
 
 @router.delete("/menus/{menu_id}")
@@ -94,9 +103,11 @@ def delete_menu(menu_id: int, db: Session = Depends(get_db), current_user: model
     menu = db.query(models.Menu).filter(models.Menu.id == menu_id).first()
     if not menu: raise HTTPException(status_code=404, detail="메뉴를 찾을 수 없습니다.")
     verify_store_permission(db, current_user, menu.store_id)
-    
+
+    menu_name = menu.name
     db.delete(menu)
     db.commit()
+    create_audit_log(db=db, user_id=current_user.id, action="DELETE_MENU", target_type="MENU", target_id=menu_id, details=f"메뉴 삭제: [{menu_name}]")
     return {"message": "메뉴가 삭제되었습니다."}
 
 
