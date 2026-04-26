@@ -425,6 +425,9 @@ class ResetPasswordRequest(BaseModel):
     token: str
     new_password: str
 
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
 # [순환 참조 방지]
 class StoreResponse(StoreBase):
     id: int

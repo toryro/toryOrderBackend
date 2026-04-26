@@ -432,17 +432,31 @@ async def cancel_order(
         if not items_to_cancel:
             raise HTTPException(status_code=400, detail="취소할 항목이 없습니다. 이미 취소된 항목이거나 잘못된 ID입니다.")
 
-        refund_amount = cancel_req.amount or sum(item.price * item.quantity for item in items_to_cancel)
+        if cancel_req.amount is not None:
+            refund_amount = cancel_req.amount
+        else:
+            refund_amount = sum(item.price * item.quantity for item in items_to_cancel)
     else:
         # 전체 취소: 잔여 결제 금액 전액 환불
-        refund_amount = cancel_req.amount or order.paid_amount or order.total_price
+        if cancel_req.amount is not None:
+            refund_amount = cancel_req.amount
+        elif order.paid_amount is not None and order.paid_amount > 0:
+            refund_amount = order.paid_amount
+        else:
+            refund_amount = order.total_price
 
-    # PortOne 결제 건인 경우 실제 환불 API 호출
+    # PortOne 선불 결제 건인 경우 실제 환불 API 호출
+    # (후불 주문은 imp_uid가 None이므로 자동으로 스킵됨)
+    portone_refunded = False
     if order.imp_uid and order.payment_status in ["PAID", "PARTIAL_CANCELLED"]:
+        if not PORTONE_API_KEY or not PORTONE_API_SECRET:
+            raise HTTPException(status_code=500, detail="포트원 API 키가 서버에 설정되지 않았습니다. 관리자에게 문의하세요.")
+
         try:
             token_res = requests.post(
                 "https://api.iamport.kr/users/getToken",
-                json={"imp_key": PORTONE_API_KEY, "imp_secret": PORTONE_API_SECRET}
+                json={"imp_key": PORTONE_API_KEY, "imp_secret": PORTONE_API_SECRET},
+                timeout=10
             )
             if token_res.status_code != 200:
                 raise HTTPException(status_code=500, detail="PG사 토큰 발급 실패")
@@ -452,13 +466,14 @@ async def cancel_order(
                 "imp_uid": order.imp_uid,
                 "reason": cancel_req.reason,
                 "amount": refund_amount,
-                "checksum": order.paid_amount,  # 현재 환불 가능 잔액
+                "checksum": order.paid_amount,  # 현재 환불 가능 잔액 (PortOne에서 잔액 불일치 시 거부)
             }
 
             cancel_res = requests.post(
                 "https://api.iamport.kr/payments/cancel",
                 headers={"Authorization": access_token},
-                json=cancel_payload
+                json=cancel_payload,
+                timeout=10
             )
             cancel_data = cancel_res.json()
 
@@ -468,6 +483,8 @@ async def cancel_order(
                     detail=f"환불 처리 실패: {cancel_data.get('message', '알 수 없는 오류')}"
                 )
 
+            portone_refunded = True
+
         except HTTPException:
             raise
         except Exception as e:
@@ -475,6 +492,8 @@ async def cancel_order(
             raise HTTPException(status_code=500, detail=f"환불 처리 중 오류: {str(e)}")
 
     # DB 상태 업데이트
+    # ※ PortOne 환불이 성공했는데 DB commit이 실패하면 돈은 환불됐지만 DB는 여전히 PAID 상태가 됨
+    #   이를 감지하기 위해 commit 실패 시 긴급 알림을 발송함
     if is_partial:
         for item in items_to_cancel:
             item.is_cancelled = True
@@ -487,7 +506,22 @@ async def cancel_order(
         order.paid_amount = 0
         order.is_completed = True
 
-    db.commit()
+    try:
+        db.commit()
+    except Exception as db_err:
+        db.rollback()
+        if portone_refunded:
+            # 치명적: PortOne 환불은 완료됐지만 DB 업데이트 실패 → 수동 처리 필요
+            send_discord_alert(
+                f"🚨 치명적 오류: PortOne 환불 성공 후 DB 업데이트 실패!\n"
+                f"주문번호: {order_id} | 환불금액: {refund_amount}원 | imp_uid: {order.imp_uid}\n"
+                f"즉시 수동으로 DB를 확인하고 상태를 업데이트하세요.\n오류: {str(db_err)}"
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="환불은 처리됐으나 DB 업데이트에 실패했습니다. 관리자에게 즉시 문의하세요."
+            )
+        raise HTTPException(status_code=500, detail=f"DB 업데이트 실패: {str(db_err)}")
 
     create_audit_log(
         db, current_user.id,

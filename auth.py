@@ -16,6 +16,7 @@ if not SECRET_KEY:
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24시간 유효
+REFRESH_TOKEN_EXPIRE_DAYS = 30         # 30일 유효
 
 # 비밀번호 암호화 도구
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -39,7 +40,24 @@ def create_access_token(data: dict):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-# 4. 출입증 검사 (현재 로그인한 사장님이 누구인지 확인)
+# 4. 리프레시 토큰 발급
+def create_refresh_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    to_encode.update({"exp": expire, "type": "refresh"})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+# 5. 리프레시 토큰 검증 → email 반환, 실패 시 None
+def verify_refresh_token(token: str) -> Optional[str]:
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("type") != "refresh":
+            return None
+        return payload.get("sub")
+    except JWTError:
+        return None
+
+# 6. 출입증 검사 (현재 로그인한 사장님이 누구인지 확인)
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(database.get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,

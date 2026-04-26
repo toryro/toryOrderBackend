@@ -83,6 +83,18 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
             headers={"WWW-Authenticate": "Bearer"},
         )
     access_token = auth.create_access_token(data={"sub": user.email})
+    refresh_token = auth.create_refresh_token(data={"sub": user.email})
+    return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
+
+@router.post("/token/refresh", response_model=dict)
+async def refresh_access_token(body: schemas.RefreshTokenRequest, db: Session = Depends(get_db)):
+    email = auth.verify_refresh_token(body.refresh_token)
+    if not email:
+        raise HTTPException(status_code=401, detail="유효하지 않은 리프레시 토큰입니다.")
+    user = crud.get_user_by_email(db, email=email)
+    if not user:
+        raise HTTPException(status_code=401, detail="사용자를 찾을 수 없습니다.")
+    access_token = auth.create_access_token(data={"sub": user.email})
     return {"access_token": access_token, "token_type": "bearer"}
 
 @router.get("/users/me", response_model=schemas.UserResponse)
