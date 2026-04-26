@@ -167,6 +167,7 @@ class StoreBase(BaseModel):
     printer_config: Optional[str] = "NONE"
     auto_kitchen_print: Optional[bool] = False
     allow_staff_order: Optional[bool] = True
+    closing_hour: Optional[int] = 0
 
     receipt_printer_type: Optional[str] = "FILE"
     receipt_printer_host: Optional[str] = ""
@@ -208,6 +209,7 @@ class StoreUpdate(BaseModel):
     printer_config: Optional[str] = None
     auto_kitchen_print: Optional[bool] = None
     allow_staff_order: Optional[bool] = None
+    closing_hour: Optional[int] = None
 
     receipt_printer_type: Optional[str] = None
     receipt_printer_host: Optional[str] = None
@@ -346,6 +348,7 @@ class OrderItem(BaseModel):
     quantity: int
     options_desc: Optional[str] = None
     is_cancelled: Optional[bool] = False
+    original_price: Optional[int] = None
     model_config = ConfigDict(from_attributes=True)
 
 class OrderResponse(OrderBase):

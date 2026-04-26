@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 
 # 프로젝트 내부 모듈
 import models
@@ -295,12 +295,18 @@ def get_store_stats(store_id: int, start_date: str, end_date: str, db: Session =
     from datetime import datetime as dt, timedelta
     verify_store_permission(db, current_user, store_id)
 
-    # 현재 기간 + 취소 주문 포함 전체 조회
+    store = db.query(models.Store).filter(models.Store.id == store_id).first()
+    closing_hour = int(store.closing_hour or 0) if store else 0
+
+    # closing_hour 기준으로 영업일 경계 설정
+    start_dt = dt.strptime(start_date, "%Y-%m-%d").replace(hour=closing_hour, minute=0, second=0)
+    end_dt   = dt.strptime(end_date,   "%Y-%m-%d").replace(hour=closing_hour, minute=0, second=0) + timedelta(days=1)
+
     orders = db.query(models.Order).filter(
         models.Order.store_id == store_id,
         models.Order.payment_status.in_(["PAID", "DEFERRED", "PARTIAL_CANCELLED", "CANCELLED"]),
-        models.Order.created_at >= f"{start_date} 00:00:00",
-        models.Order.created_at <= f"{end_date} 23:59:59"
+        models.Order.created_at >= start_dt,
+        models.Order.created_at < end_dt
     ).all()
 
     paid_orders     = [o for o in orders if o.payment_status in ["PAID", "PARTIAL_CANCELLED"]]
@@ -314,17 +320,15 @@ def get_store_stats(store_id: int, start_date: str, end_date: str, db: Session =
     order_count      = len(paid_orders)
 
     # 직전 동일 기간 매출 (성장률 계산용)
-    start_dt_obj = dt.strptime(start_date, "%Y-%m-%d")
-    end_dt_obj   = dt.strptime(end_date,   "%Y-%m-%d")
-    period_days  = (end_dt_obj - start_dt_obj).days + 1
-    prev_end_dt   = start_dt_obj - timedelta(days=1)
-    prev_start_dt = prev_end_dt - timedelta(days=period_days - 1)
+    period_days   = (end_dt - start_dt).days
+    prev_end_dt   = start_dt
+    prev_start_dt = prev_end_dt - timedelta(days=period_days)
 
     prev_orders = db.query(models.Order).filter(
         models.Order.store_id == store_id,
         models.Order.payment_status.in_(["PAID", "PARTIAL_CANCELLED"]),
-        models.Order.created_at >= prev_start_dt.strftime("%Y-%m-%d") + " 00:00:00",
-        models.Order.created_at <= prev_end_dt.strftime("%Y-%m-%d") + " 23:59:59"
+        models.Order.created_at >= prev_start_dt,
+        models.Order.created_at < prev_end_dt
     ).all()
 
     prev_revenue = sum(o.paid_amount or o.total_price for o in prev_orders)
@@ -334,12 +338,22 @@ def get_store_stats(store_id: int, start_date: str, end_date: str, db: Session =
     # 집계 데이터 초기화
     WEEKDAY_NAMES = ["월", "화", "수", "목", "금", "토", "일"]
     menu_data           = {}
+    category_data       = {}
     hourly_data         = {f"{i:02d}": {"sales": 0, "count": 0} for i in range(24)}
     daily_data          = {}
     monthly_data        = {}
     weekday_data        = {i: {"sales": 0, "count": 0} for i in range(7)}
     payment_method_data = {}
     order_type_data     = {}
+    discount_original   = 0  # 할인 전 메뉴 금액 합계
+    discount_actual     = 0  # 실제 결제 금액 합계 (옵션 포함)
+    has_original_price  = False
+
+    # 카테고리 이름 캐시 (menu_name → category_name)
+    menu_category_map = {}
+    for cat in db.query(models.Category).filter(models.Category.store_id == store_id).all():
+        for menu in cat.menus:
+            menu_category_map[menu.name] = cat.name
 
     for order in orders:
         if order.payment_status == "CANCELLED":
@@ -349,10 +363,12 @@ def get_store_stats(store_id: int, start_date: str, end_date: str, db: Session =
             if isinstance(created, str):
                 created = dt.strptime(created.split(".")[0], "%Y-%m-%d %H:%M:%S")
 
-            d_part      = created.strftime("%Y-%m-%d")
+            # closing_hour 보정: 영업일 기준 날짜
+            business_dt = created - timedelta(hours=closing_hour)
+            d_part      = business_dt.strftime("%Y-%m-%d")
             order_hour  = created.strftime("%H")
-            order_month = created.strftime("%Y-%m")
-            weekday_idx = created.weekday()  # 0=월 … 6=일
+            order_month = business_dt.strftime("%Y-%m")
+            weekday_idx = business_dt.weekday()  # 0=월 … 6=일
 
             is_paid = order.payment_status in ["PAID", "PARTIAL_CANCELLED"]
             order_revenue = (order.paid_amount or order.total_price) if is_paid else 0
@@ -387,9 +403,21 @@ def get_store_stats(store_id: int, start_date: str, end_date: str, db: Session =
             for item in order.items:
                 if item.is_cancelled:
                     continue
+                item_revenue = item.price * item.quantity
+
                 menu_data.setdefault(item.menu_name, {"count": 0, "revenue": 0})
                 menu_data[item.menu_name]["count"] += item.quantity
-                menu_data[item.menu_name]["revenue"] += item.price * item.quantity
+                menu_data[item.menu_name]["revenue"] += item_revenue
+
+                cat_name = menu_category_map.get(item.menu_name, "미분류")
+                category_data.setdefault(cat_name, {"count": 0, "revenue": 0})
+                category_data[cat_name]["count"] += item.quantity
+                category_data[cat_name]["revenue"] += item_revenue
+
+                if is_paid and item.original_price is not None:
+                    has_original_price = True
+                    discount_original += item.original_price * item.quantity
+                    discount_actual   += item_revenue
         except Exception:
             pass
 
@@ -402,9 +430,12 @@ def get_store_stats(store_id: int, start_date: str, end_date: str, db: Session =
     count_growth_rate    = round(((order_count - prev_count) / prev_count) * 100, 1) if prev_count > 0 else None
 
     menu_stats           = sorted([{"name": k, "count": v["count"], "revenue": v["revenue"]} for k, v in menu_data.items()], key=lambda x: x["revenue"], reverse=True)
+    category_stats       = sorted([{"name": k, "count": v["count"], "revenue": v["revenue"]} for k, v in category_data.items()], key=lambda x: x["revenue"], reverse=True)
     payment_method_stats = [{"method": k, "count": v["count"], "revenue": v["revenue"], "avg_order_value": _avg(v["revenue"], v["count"])} for k, v in payment_method_data.items()]
     order_type_stats     = [{"type": k, "count": v["count"], "revenue": v["revenue"], "avg_order_value": _avg(v["revenue"], v["count"])} for k, v in order_type_data.items()]
     weekday_stats        = [{"weekday": WEEKDAY_NAMES[i], "weekday_index": i, "sales": weekday_data[i]["sales"], "count": weekday_data[i]["count"], "avg_order_value": _avg(weekday_data[i]["sales"], weekday_data[i]["count"])} for i in range(7)]
+
+    discount_gap = discount_original - discount_actual if has_original_price else None
 
     return {
         "total_revenue":        total_revenue,
@@ -419,11 +450,89 @@ def get_store_stats(store_id: int, start_date: str, end_date: str, db: Session =
         "growth_rate":          growth_rate,
         "aov_growth_rate":      aov_growth_rate,
         "count_growth_rate":    count_growth_rate,
+        "closing_hour":         closing_hour,
         "menu_stats":           menu_stats,
+        "category_stats":       category_stats,
         "hourly_stats":         [{"hour": k, "sales": v["sales"], "count": v["count"], "avg_order_value": _avg(v["sales"], v["count"])} for k, v in hourly_data.items()],
         "daily_stats":          [{"date": k, "sales": v["sales"], "count": v["count"], "avg_order_value": _avg(v["sales"], v["count"])} for k, v in sorted(daily_data.items(), reverse=True)],
         "monthly_stats":        [{"month": k, "sales": v["sales"], "count": v["count"], "avg_order_value": _avg(v["sales"], v["count"])} for k, v in sorted(monthly_data.items(), reverse=True)],
         "weekday_stats":        weekday_stats,
         "payment_method_stats": payment_method_stats,
         "order_type_stats":     order_type_stats,
+        "discount_original":    discount_original if has_original_price else None,
+        "discount_actual":      discount_actual   if has_original_price else None,
+        "discount_gap":         discount_gap,
     }
+
+
+@router.get("/stores/{store_id}/orders/by-date", response_model=List[schemas.OrderResponse])
+def get_orders_by_date(
+    store_id: int,
+    date: str,
+    closing_hour: int = 0,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user),
+):
+    """특정 영업일의 전체 주문 목록 (드릴다운용)"""
+    from datetime import datetime as dt, timedelta
+    verify_store_permission(db, current_user, store_id)
+
+    start_dt = dt.strptime(date, "%Y-%m-%d").replace(hour=closing_hour, minute=0, second=0)
+    end_dt   = start_dt + timedelta(days=1)
+
+    orders = (
+        db.query(models.Order)
+        .filter(
+            models.Order.store_id == store_id,
+            models.Order.payment_status.in_(["PAID", "DEFERRED", "PARTIAL_CANCELLED", "CANCELLED"]),
+            models.Order.created_at >= start_dt,
+            models.Order.created_at < end_dt,
+        )
+        .order_by(models.Order.created_at.asc())
+        .all()
+    )
+
+    result = []
+    for o in orders:
+        data = schemas.OrderResponse.model_validate(o).model_dump()
+        data["table_name"] = o.table.name if o.table else "포장/미지정"
+        result.append(data)
+    return result
+
+
+@router.get("/stores/{store_id}/orders/period", response_model=List[schemas.OrderResponse])
+def get_orders_by_period(
+    store_id: int,
+    start_date: str,
+    end_date: str,
+    status: str,          # 콤마 구분 가능: "CANCELLED" 또는 "DEFERRED"
+    closing_hour: int = 0,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user),
+):
+    """기간 + 상태별 주문 목록 (취소/후불 드릴다운용)"""
+    from datetime import datetime as dt, timedelta
+    verify_store_permission(db, current_user, store_id)
+
+    start_dt = dt.strptime(start_date, "%Y-%m-%d").replace(hour=closing_hour, minute=0, second=0)
+    end_dt   = dt.strptime(end_date,   "%Y-%m-%d").replace(hour=closing_hour, minute=0, second=0) + timedelta(days=1)
+    statuses = [s.strip() for s in status.split(",")]
+
+    orders = (
+        db.query(models.Order)
+        .filter(
+            models.Order.store_id == store_id,
+            models.Order.payment_status.in_(statuses),
+            models.Order.created_at >= start_dt,
+            models.Order.created_at < end_dt,
+        )
+        .order_by(models.Order.created_at.desc())
+        .all()
+    )
+
+    result = []
+    for o in orders:
+        data = schemas.OrderResponse.model_validate(o).model_dump()
+        data["table_name"] = o.table.name if o.table else "포장/미지정"
+        result.append(data)
+    return result

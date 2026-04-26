@@ -81,6 +81,7 @@ class Store(Base):
     printer_config = Column(String, default="NONE") # NONE, UNIFIED, SEPARATE
     auto_kitchen_print = Column(Boolean, default=False)
     allow_staff_order = Column(Boolean, default=True)
+    closing_hour = Column(Integer, default=0)  # 영업 마감 시각 (0=자정, 3=새벽3시)
 
     # 영수증 프린터 (Printer 1) 연결 설정
     receipt_printer_type = Column(String, default="FILE")   # NETWORK, SERIAL, FILE
@@ -264,6 +265,7 @@ class OrderItem(Base):
     quantity = Column(Integer)
     options_desc = Column(String, nullable=True)
     is_cancelled = Column(Boolean, default=False)
+    original_price = Column(Integer, nullable=True)  # 할인/옵션 적용 전 메뉴 기본 단가
     order = relationship("Order", back_populates="items")
 
 class StaffCall(Base):

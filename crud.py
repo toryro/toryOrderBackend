@@ -202,12 +202,13 @@ def create_order(db: Session, order: schemas.OrderCreate):
         total_price += current_item_price * item.quantity
 
         db_item = models.OrderItem(
-            store_id=order.store_id, # 🔥 [추가] 상세 주문(OrderItem)도 매장에 소속되도록 강제
+            store_id=order.store_id,
             order_id=db_order.id,
             menu_name=menu.name,
             price=current_item_price,
             quantity=item.quantity,
-            options_desc=item.options_desc 
+            options_desc=item.options_desc,
+            original_price=menu.price,  # 할인·옵션 이전 메뉴 기본 단가
         )
         db.add(db_item)
 
