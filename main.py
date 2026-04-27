@@ -8,6 +8,39 @@ import os, uuid, shutil, asyncio
 # 환경변수 로드
 load_dotenv()
 
+# =========================================================
+# 🔭 Sentry 에러 모니터링
+# =========================================================
+import sentry_sdk
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.integrations.starlette import StarletteIntegration
+from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
+
+def _sentry_before_send(event, hint):
+    """401·403·404는 정상적인 인증/탐색 실패이므로 Sentry에 전송하지 않음."""
+    exc_info = hint.get("exc_info")
+    if exc_info:
+        exc_value = exc_info[1]
+        if hasattr(exc_value, "status_code") and exc_value.status_code in (401, 403, 404):
+            return None
+    return event
+
+_sentry_dsn = os.getenv("SENTRY_DSN")
+if _sentry_dsn:
+    sentry_sdk.init(
+        dsn=_sentry_dsn,
+        integrations=[
+            StarletteIntegration(transaction_style="endpoint"),
+            FastApiIntegration(transaction_style="endpoint"),
+            SqlalchemyIntegration(),             # 슬로우 쿼리·DB 에러 추적
+        ],
+        traces_sample_rate=0.1,                  # 요청의 10%만 성능 트레이싱 (부하 최소화)
+        environment=os.getenv("ENVIRONMENT", "development"),
+        before_send=_sentry_before_send,
+        send_default_pii=False,                  # 개인정보 자동 수집 비활성화
+    )
+# =========================================================
+
 # DB 및 내부 모듈
 from database import engine, SessionLocal
 from connection_manager import manager

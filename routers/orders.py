@@ -251,6 +251,7 @@ async def collect_payment(
     order.payment_status = "PAID"
     order.payment_method = req.payment_method
     order.paid_amount = order.total_price
+    order.is_completed = True  # 수납 완료 시점에 주문을 완전히 종료
     db.commit()
     create_audit_log(db=db, user_id=current_user.id, action="COLLECT_PAYMENT", target_type="ORDER", target_id=order_id, details=f"후불 수납 완료: 주문#{order.daily_number} {order.total_price:,}원 ({req.payment_method})")
 
@@ -337,9 +338,11 @@ async def complete_order(order_id: int, db: Session = Depends(get_db), current_u
     table_id = order.table_id
     store_id = order.store_id
     
-    # 1. 현재 주문 완료 처리 및 확정
-    order.is_completed = True 
+    # 1. 조리 완료 처리
+    # DEFERRED(후불) 주문은 수납 완료 시점에 is_completed=True가 되므로 여기서는 변경 안 함
     order.cooking_status = "COMPLETED"
+    if order.payment_status != "DEFERRED":
+        order.is_completed = True
     db.commit()
     
     # 2. 미완료 주문 확인 및 테이블 상태 변경

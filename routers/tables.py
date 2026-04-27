@@ -205,22 +205,36 @@ async def update_table_status(
 # ✨ [신규 추가] 현황판 퇴석 처리 및 QR 토큰 갱신 API
 # =========================================================
 @router.post("/tables/{table_id}/clear")
-async def clear_table(table_id: int, db: Session = Depends(get_db)):
+async def clear_table(
+    table_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user),
+):
     table = db.query(models.Table).filter(models.Table.id == table_id).first()
     if not table:
         raise HTTPException(status_code=404, detail="테이블을 찾을 수 없습니다.")
 
-    # 🛡️ [방어 로직] 조리 중이거나 대기 중인 주문이 있는지 확인
+    verify_store_permission(db, current_user, table.store_id)
+
+    # 미완료 주문 전체 조회 (결제 상태 무관)
     pending_orders = db.query(models.Order).filter(
         models.Order.table_id == table_id,
         models.Order.is_completed == False,
         models.Order.payment_status != "CANCELLED"
     ).all()
 
-    # 만약 강제로 비우는 것이라면 주문들을 모두 취소 처리하거나 완료 처리해야 함
+    deferred_orders = [o for o in pending_orders if o.payment_status == "DEFERRED"]
+    if deferred_orders:
+        total_deferred = sum(o.total_price or 0 for o in deferred_orders)
+        raise HTTPException(
+            status_code=400,
+            detail=f"미수납 주문 {len(deferred_orders)}건({total_deferred:,}원)이 있습니다. 수납 처리 후 퇴석해주세요."
+        )
+
+    # DEFERRED가 없는 나머지 주문만 취소 처리
     for order in pending_orders:
-        order.payment_status = "CANCELLED"  # 또는 운영 방침에 따라 처리
-        order.is_completed = True 
+        order.payment_status = "CANCELLED"
+        order.is_completed = True
 
     # 기존 손님의 방문 세션 만료 (재주문 차단)
     crud.invalidate_table_sessions(db, table_id)
@@ -230,13 +244,13 @@ async def clear_table(table_id: int, db: Session = Depends(get_db)):
     table.occupied_at = None
     db.commit()
 
-    # 📡 [웹소켓] 주방과 현황판에 '테이블 비워짐 + 주문 취소됨' 알림 전송
+    # 📡 주방·현황판에 테이블 비워짐 알림 전송
     await manager.broadcast(json.dumps({
         "type": "TABLE_STATUS_CHANGED",
         "table_id": table_id,
         "status": "EMPTY",
-        "message": "CANCEL_PENDING_ORDERS" # 주방에서 이 메시지를 받으면 해당 테이블 주문 제거
-    }), table.store_id)
+        "message": "CANCEL_PENDING_ORDERS"
+    }), int(table.store_id))
 
     return {"message": "테이블이 성공적으로 비워졌습니다."}
 
