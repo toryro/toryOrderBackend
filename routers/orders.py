@@ -25,6 +25,36 @@ PORTONE_API_SECRET = os.getenv("PORTONE_API_SECRET")
 router = APIRouter(tags=["Orders & Payments"])
 
 
+def _build_cash_receipt_body(items, total_amount: int, cr_merchant_uid: str, cr: schemas.CashReceiptRequest) -> dict:
+    """포트원 외부 현금영수증 발급 요청 바디를 생성합니다."""
+    type_map = {"PERSONAL": "person", "BUSINESS": "company"}
+    id_type_map = {"phone": "phone", "card": "card", "business": "business_reg"}
+    taxable = sum(i.price * i.quantity for i in items if not getattr(i, "is_tax_exempt", False))
+    tax_free = total_amount - taxable
+    vat = round(taxable / 11)
+    return {
+        "type": type_map.get(cr.trade_type, "person"),
+        "identifier_type": id_type_map.get(cr.identifier_type, "phone"),
+        "identifier": cr.identifier,
+        "amount": total_amount,
+        "vat": vat,
+        "tax_free": tax_free,
+        "product_name": "식음료",
+    }
+
+
+def _get_portone_token() -> str:
+    """포트원 액세스 토큰을 발급합니다. 실패 시 예외를 발생시킵니다."""
+    res = requests.post(
+        "https://api.iamport.kr/users/getToken",
+        json={"imp_key": PORTONE_API_KEY, "imp_secret": PORTONE_API_SECRET},
+        timeout=10
+    )
+    if res.status_code != 200:
+        raise Exception("포트원 토큰 발급 실패")
+    return res.json()["response"]["access_token"]
+
+
 # =========================================================
 # 🛒 [그룹 1] 주문 생성 및 결제 (손님 & 직원 공통)
 # =========================================================
@@ -248,12 +278,44 @@ async def collect_payment(
     if order.payment_status not in ("DEFERRED",):
         raise HTTPException(status_code=400, detail="후불(미수납) 주문만 수납 처리할 수 있습니다.")
 
+    # 현금영수증 발급 시도 (현금 결제 + 요청 있을 때만 / 실패해도 수납은 계속)
+    cash_receipt_result = None
+    if req.payment_method == "cash" and req.cash_receipt and PORTONE_API_KEY and PORTONE_API_SECRET:
+        cr = req.cash_receipt
+        cr_merchant_uid = f"cr_{order_id}_{int(datetime.now().timestamp())}"
+        try:
+            access_token = _get_portone_token()
+            body = _build_cash_receipt_body(order.items, order.total_price, cr_merchant_uid, cr)
+            receipt_res = requests.post(
+                f"https://api.iamport.kr/receipts/external/{cr_merchant_uid}",
+                headers={"Authorization": access_token},
+                json=body,
+                timeout=10
+            )
+            rd = receipt_res.json()
+            if receipt_res.status_code == 200 and rd.get("code") == 0:
+                resp = rd.get("response", {})
+                order.cash_receipt_status = "ISSUED"
+                order.cash_receipt_number = resp.get("receipt_tid") or resp.get("pg_tid")
+                order.cash_receipt_type = cr.trade_type
+                order.cash_receipt_merchant_uid = cr_merchant_uid
+                cash_receipt_result = "ISSUED"
+            else:
+                order.cash_receipt_status = "FAILED"
+                cash_receipt_result = "FAILED"
+                send_discord_alert(f"현금영수증 발급 실패!\n주문번호: {order_id}\n응답: {rd.get('message')}")
+        except Exception as e:
+            order.cash_receipt_status = "FAILED"
+            cash_receipt_result = "FAILED"
+            send_discord_alert(f"현금영수증 발급 오류!\n주문번호: {order_id}\n내용: {str(e)}")
+
     order.payment_status = "PAID"
     order.payment_method = req.payment_method
     order.paid_amount = order.total_price
     order.is_completed = True  # 수납 완료 시점에 주문을 완전히 종료
     db.commit()
-    create_audit_log(db=db, user_id=current_user.id, action="COLLECT_PAYMENT", target_type="ORDER", target_id=order_id, details=f"후불 수납 완료: 주문#{order.daily_number} {order.total_price:,}원 ({req.payment_method})")
+    cr_detail = f" | 현금영수증: {cash_receipt_result}" if cash_receipt_result else ""
+    create_audit_log(db=db, user_id=current_user.id, action="COLLECT_PAYMENT", target_type="ORDER", target_id=order_id, details=f"후불 수납 완료: 주문#{order.daily_number} {order.total_price:,}원 ({req.payment_method}){cr_detail}")
 
     try:
         await manager.broadcast(json.dumps({
@@ -544,11 +606,142 @@ async def cancel_order(
     except Exception as e:
         print(f"WS Error: {e}")
 
+    # 현금영수증 처리 (ISSUED 상태일 때만)
+    if order.cash_receipt_status == "ISSUED" and order.cash_receipt_merchant_uid and PORTONE_API_KEY and PORTONE_API_SECRET:
+        old_cr_uid = order.cash_receipt_merchant_uid
+        remaining_amount = (order.paid_amount or 0)  # DB commit 이후이므로 이미 갱신된 값 사용
+
+        try:
+            access_token = _get_portone_token()
+
+            # 1. 기존 현금영수증 조회 (재발급에 필요한 식별번호 확보)
+            get_res = requests.get(
+                f"https://api.iamport.kr/receipts/external/{old_cr_uid}",
+                headers={"Authorization": access_token},
+                timeout=10
+            )
+            orig = get_res.json().get("response", {}) if get_res.status_code == 200 else {}
+
+            # 2. 기존 현금영수증 취소
+            del_res = requests.delete(
+                f"https://api.iamport.kr/receipts/external/{old_cr_uid}",
+                headers={"Authorization": access_token},
+                timeout=10
+            )
+            del_data = del_res.json()
+            if del_res.status_code != 200 or del_data.get("code") != 0:
+                raise Exception(f"현금영수증 취소 실패: {del_data.get('message')}")
+
+            if is_partial and remaining_amount > 0 and orig.get("identifier"):
+                # 3. 부분 취소: 남은 금액으로 새 현금영수증 재발급
+                new_cr_uid = f"cr_{order_id}_{int(datetime.now().timestamp())}"
+                active_items = [i for i in order.items if not i.is_cancelled]
+                taxable = sum(i.price * i.quantity for i in active_items if not getattr(i, "is_tax_exempt", False))
+                tax_free = remaining_amount - taxable
+                new_res = requests.post(
+                    f"https://api.iamport.kr/receipts/external/{new_cr_uid}",
+                    headers={"Authorization": access_token},
+                    json={
+                        "type": orig.get("type", "person"),
+                        "identifier_type": orig.get("identifier_type", "phone"),
+                        "identifier": orig.get("identifier"),
+                        "amount": remaining_amount,
+                        "vat": round(taxable / 11),
+                        "tax_free": tax_free,
+                        "product_name": "식음료",
+                    },
+                    timeout=10
+                )
+                new_data = new_res.json()
+                if new_res.status_code == 200 and new_data.get("code") == 0:
+                    resp = new_data.get("response", {})
+                    order.cash_receipt_status = "ISSUED"
+                    order.cash_receipt_number = resp.get("receipt_tid") or resp.get("pg_tid")
+                    order.cash_receipt_merchant_uid = new_cr_uid
+                else:
+                    order.cash_receipt_status = "FAILED"
+                    send_discord_alert(
+                        f"현금영수증 재발급 실패! 수동 처리 필요\n"
+                        f"주문번호: {order_id} | 남은금액: {remaining_amount}원\n"
+                        f"응답: {new_data.get('message')}"
+                    )
+            else:
+                # 전체 취소 또는 재발급 식별번호 없음: CANCELLED 처리
+                order.cash_receipt_status = "CANCELLED"
+                order.cash_receipt_merchant_uid = None
+
+            db.commit()
+
+        except Exception as e:
+            send_discord_alert(
+                f"현금영수증 {'부분취소 후 재발급' if is_partial else '취소'} 오류! 수동 처리 필요\n"
+                f"주문번호: {order_id} | merchant_uid: {old_cr_uid}\n"
+                f"오류: {str(e)}"
+            )
+
     return {
         "message": "부분 취소 완료" if is_partial else "주문 취소 완료",
         "refund_amount": refund_amount,
         "payment_status": order.payment_status
     }
+
+
+@router.post("/orders/{order_id}/cash-receipt/reissue")
+async def reissue_cash_receipt(
+    order_id: int,
+    req: schemas.CashReceiptRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user),
+):
+    """FAILED 또는 CANCELLED 상태의 현금영수증을 재발급합니다."""
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="주문을 찾을 수 없습니다.")
+
+    verify_store_permission(db, current_user, order.store_id)
+
+    if order.payment_method != "cash":
+        raise HTTPException(status_code=400, detail="현금 결제 주문만 현금영수증을 발급할 수 있습니다.")
+    if order.cash_receipt_status not in ("FAILED", "CANCELLED", "NONE"):
+        raise HTTPException(status_code=400, detail=f"재발급 불가 상태입니다: {order.cash_receipt_status}")
+    if not PORTONE_API_KEY or not PORTONE_API_SECRET:
+        raise HTTPException(status_code=500, detail="포트원 API 키가 설정되지 않았습니다.")
+
+    active_items = [i for i in order.items if not i.is_cancelled]
+    total_amount = sum(i.price * i.quantity for i in active_items)
+    if total_amount <= 0:
+        raise HTTPException(status_code=400, detail="유효한 주문 금액이 없습니다.")
+
+    cr_merchant_uid = f"cr_{order_id}_{int(datetime.now().timestamp())}"
+    try:
+        access_token = _get_portone_token()
+        body = _build_cash_receipt_body(active_items, total_amount, cr_merchant_uid, req)
+        receipt_res = requests.post(
+            f"https://api.iamport.kr/receipts/external/{cr_merchant_uid}",
+            headers={"Authorization": access_token},
+            json=body,
+            timeout=10
+        )
+        rd = receipt_res.json()
+        if receipt_res.status_code != 200 or rd.get("code") != 0:
+            raise HTTPException(status_code=400, detail=f"현금영수증 발급 실패: {rd.get('message', '알 수 없는 오류')}")
+
+        resp = rd.get("response", {})
+        order.cash_receipt_status = "ISSUED"
+        order.cash_receipt_number = resp.get("receipt_tid") or resp.get("pg_tid")
+        order.cash_receipt_type = req.trade_type
+        order.cash_receipt_merchant_uid = cr_merchant_uid
+        db.commit()
+
+        create_audit_log(db=db, user_id=current_user.id, action="CASH_RECEIPT_REISSUE",
+                         target_type="ORDER", target_id=order_id,
+                         details=f"현금영수증 재발급: {req.trade_type} / {req.identifier_type}")
+        return {"status": "ISSUED", "cash_receipt_number": order.cash_receipt_number}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"재발급 중 오류: {str(e)}")
 
 
 @router.get("/stores/{store_id}/orders/history", response_model=List[schemas.OrderResponse])

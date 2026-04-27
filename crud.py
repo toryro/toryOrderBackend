@@ -208,7 +208,8 @@ def create_order(db: Session, order: schemas.OrderCreate):
             price=current_item_price,
             quantity=item.quantity,
             options_desc=item.options_desc,
-            original_price=menu.price,  # 할인·옵션 이전 메뉴 기본 단가
+            original_price=menu.price,
+            is_tax_exempt=menu.is_tax_exempt,
         )
         db.add(db_item)
 

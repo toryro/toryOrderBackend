@@ -106,6 +106,7 @@ class MenuBase(BaseModel):
     image_url: Optional[str] = None 
     order_index: int = 0
     is_price_fixed: bool = False
+    is_tax_exempt: bool = False
     target_time: Optional[int] = 15
 
     # 할인 및 타임세일
@@ -349,6 +350,7 @@ class OrderItem(BaseModel):
     options_desc: Optional[str] = None
     is_cancelled: Optional[bool] = False
     original_price: Optional[int] = None
+    is_tax_exempt: Optional[bool] = False
     model_config = ConfigDict(from_attributes=True)
 
 class OrderResponse(OrderBase):
@@ -365,6 +367,9 @@ class OrderResponse(OrderBase):
     cooking_status: Optional[str] = "PENDING"
     target_time: Optional[int] = 15
     order_type: str = "DINE_IN"
+    cash_receipt_status: Optional[str] = "NONE"
+    cash_receipt_number: Optional[str] = None
+    cash_receipt_type: Optional[str] = None
     model_config = ConfigDict(from_attributes=True)
 
 class UserResponse(UserBase):
@@ -408,8 +413,14 @@ class PaymentVerifyRequest(BaseModel):
     virtual_session_token: Optional[str] = None
     session_token: Optional[str] = None  # 포장 카운터 세션 결제 완료 후 파기용
 
+class CashReceiptRequest(BaseModel):
+    identifier_type: str  # "phone" | "card" | "business"
+    identifier: str       # 휴대폰번호, 카드번호, 사업자번호 (숫자만)
+    trade_type: str = "PERSONAL"  # "PERSONAL"(소득공제) | "BUSINESS"(지출증빙)
+
 class CollectPaymentRequest(BaseModel):
     payment_method: str  # "card" | "cash" | "POS" | "기타"
+    cash_receipt: Optional[CashReceiptRequest] = None
 
 class Token(BaseModel):
     access_token: str

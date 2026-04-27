@@ -144,6 +144,7 @@ class Menu(Base):
     category = relationship("Category", back_populates="menus")
     menu_option_links = relationship("MenuOptionLink", back_populates="menu", cascade="all, delete-orphan")
     is_price_fixed = Column(Boolean, default=False) # 본사에서 가격 변경을 금지했는지 여부
+    is_tax_exempt = Column(Boolean, default=False)  # 면세 메뉴 여부 (현금영수증 VAT 계산에 사용)
 
     # 할인 및 타임세일
     is_discounted = Column(Boolean, default=False)
@@ -247,6 +248,12 @@ class Order(Base):
     paid_amount = Column(Integer, default=0)
     order_type = Column(String, default="DINE_IN") # 'DINE_IN', 'TAKEOUT'
 
+    # 현금영수증
+    cash_receipt_status = Column(String, nullable=True, default="NONE")  # NONE | ISSUED | FAILED | CANCELLED
+    cash_receipt_number = Column(String, nullable=True)         # PortOne 승인번호 (receipt_tid)
+    cash_receipt_type = Column(String, nullable=True)           # PERSONAL | BUSINESS
+    cash_receipt_merchant_uid = Column(String, nullable=True)   # 발급 시 사용한 merchant_uid (취소에 필요)
+
     store = relationship("Store", back_populates="orders")
     table = relationship("Table", back_populates="orders")
     items = relationship("OrderItem", back_populates="order")
@@ -266,6 +273,7 @@ class OrderItem(Base):
     options_desc = Column(String, nullable=True)
     is_cancelled = Column(Boolean, default=False)
     original_price = Column(Integer, nullable=True)  # 할인/옵션 적용 전 메뉴 기본 단가
+    is_tax_exempt = Column(Boolean, default=False)   # 발주 시점의 면세 여부 (Menu에서 복사)
     order = relationship("Order", back_populates="items")
 
 class StaffCall(Base):
