@@ -5,6 +5,7 @@ import json
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[int, List[WebSocket]] = {}
+        self.display_snapshots: Dict[int, list] = {}
 
     async def connect(self, websocket: WebSocket, store_id: int):
         await websocket.accept()
@@ -12,6 +13,11 @@ class ConnectionManager:
             self.active_connections[store_id] = []
         self.active_connections[store_id].append(websocket)
         print(f"--- Store {store_id}: 새로운 기기가 연결되었습니다. ---")
+        snapshot = self.display_snapshots.get(store_id, [])
+        await websocket.send_text(json.dumps({"type": "RESTORE_DISPLAY", "displayOrders": snapshot}))
+
+    def save_snapshot(self, store_id: int, display_orders: list):
+        self.display_snapshots[store_id] = display_orders
 
     def disconnect(self, websocket: WebSocket, store_id: int):
         if store_id in self.active_connections:

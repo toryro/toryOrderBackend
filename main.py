@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from jose import jwt
 from dotenv import load_dotenv
-import os, uuid, shutil, asyncio
+import os, uuid, shutil, asyncio, json
 
 # 환경변수 로드
 load_dotenv()
@@ -162,10 +162,10 @@ async def websocket_endpoint(websocket: WebSocket, store_id: int, token: str = Q
     await manager.connect(websocket, store_id)
     try:
         while True:
-            # 클라이언트(주방)가 연결을 끊을 때까지 대기
             data = await websocket.receive_text()
-
-            # ✨ [신규] 받은 데이터를 같은 매장의 다른 기기 화면들에 그대로 전달 (화면 동기화)
+            parsed = json.loads(data)
+            if parsed.get("type") == "SYNC_DISPLAY":
+                manager.save_snapshot(store_id, parsed.get("displayOrders", []))
             await manager.broadcast(data, store_id)
     except WebSocketDisconnect:
         manager.disconnect(websocket, store_id)
