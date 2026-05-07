@@ -195,10 +195,19 @@ if os.path.isdir(_SPA_DIR):
     class _SPAFiles(_StarletteStaticFiles):
         async def get_response(self, path, scope):
             try:
-                return await super().get_response(path, scope)
+                response = await super().get_response(path, scope)
             except _StarletteHTTPException as e:
                 if e.status_code == 404:
-                    return await super().get_response("index.html", scope)
-                raise
+                    response = await super().get_response("index.html", scope)
+                else:
+                    raise
+            # index.html은 항상 최신 버전을 내려받도록 캐시 방지
+            if getattr(response, "headers", None) is not None:
+                content_type = response.headers.get("content-type", "")
+                if "text/html" in content_type:
+                    response.headers["cache-control"] = "no-cache, no-store, must-revalidate"
+                    response.headers["pragma"] = "no-cache"
+                    response.headers["expires"] = "0"
+            return response
 
     app.mount("/", _SPAFiles(directory=_SPA_DIR, html=True), name="spa")
