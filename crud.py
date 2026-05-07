@@ -180,7 +180,9 @@ def create_order(db: Session, order: schemas.OrderCreate):
         daily_number=next_daily_number,
         total_price=0,
         is_completed=False,
-        created_at=now 
+        created_at=now,
+        order_type=order.order_type,
+        customer_phone=order.customer_phone,
     )
     db.add(db_order)
     db.commit()

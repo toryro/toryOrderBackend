@@ -65,12 +65,15 @@ async def _heartbeat_loop():
 async def start_heartbeat():
     asyncio.create_task(_heartbeat_loop())
 
+_cors_origins_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
+_cors_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()] or ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],  
-    allow_headers=["*"],  
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 os.makedirs("uploads", exist_ok=True)
@@ -178,3 +181,24 @@ app.include_router(orders.router)
 app.include_router(tables.router)
 app.include_router(system.router)
 app.include_router(printer_router.router)
+
+# =========================================================
+# React SPA 서빙 (반드시 모든 라우터 등록 후 마지막에)
+# =========================================================
+from starlette.staticfiles import StaticFiles as _StarletteStaticFiles
+from fastapi.responses import FileResponse as _FileResponse
+from starlette.exceptions import HTTPException as _StarletteHTTPException
+
+_SPA_DIR = os.getenv("SPA_DIR", "../frontend/dist")
+
+if os.path.isdir(_SPA_DIR):
+    class _SPAFiles(_StarletteStaticFiles):
+        async def get_response(self, path, scope):
+            try:
+                return await super().get_response(path, scope)
+            except _StarletteHTTPException as e:
+                if e.status_code == 404:
+                    return await super().get_response("index.html", scope)
+                raise
+
+    app.mount("/", _SPAFiles(directory=_SPA_DIR, html=True), name="spa")

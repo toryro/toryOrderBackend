@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
+import json
 
 # 프로젝트 내부 모듈
 import models
@@ -8,6 +9,7 @@ import schemas
 import crud
 import dependencies
 from database import get_db
+from connection_manager import manager
 
 # 공통 함수 (utils.py)
 from utils import verify_store_permission, create_audit_log
@@ -539,3 +541,50 @@ def get_orders_by_period(
         data["table_name"] = o.table.name if o.table else "포장/미지정"
         result.append(data)
     return result
+
+
+# =========================================================
+# 🚨 긴급 모드 토글
+# =========================================================
+
+@router.post("/stores/{store_id}/emergency-mode")
+async def toggle_emergency_mode(
+    store_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user),
+):
+    """
+    긴급 모드 ON/OFF 토글.
+    ON: 선불 결제를 차단하고 후불(현금/카드단말기)로 강제 전환.
+    OFF: 정상 운영 복귀.
+    """
+    verify_store_permission(db, current_user, store_id)
+    store = db.query(models.Store).filter(models.Store.id == store_id).first()
+    if not store:
+        raise HTTPException(status_code=404, detail="매장을 찾을 수 없습니다.")
+
+    store.is_emergency_mode = not store.is_emergency_mode
+    db.commit()
+
+    action = "EMERGENCY_ON" if store.is_emergency_mode else "EMERGENCY_OFF"
+    create_audit_log(
+        db=db, user_id=current_user.id, action=action,
+        target_type="STORE", target_id=store_id,
+        details=f"긴급 모드 {'활성화' if store.is_emergency_mode else '해제'}: [{store.name}]",
+    )
+
+    try:
+        await manager.broadcast(
+            json.dumps({
+                "type": "EMERGENCY_MODE_CHANGED",
+                "is_emergency": store.is_emergency_mode,
+            }, ensure_ascii=False),
+            store_id=store_id,
+        )
+    except Exception:
+        pass
+
+    return {
+        "is_emergency_mode": store.is_emergency_mode,
+        "message": "긴급 모드 활성화" if store.is_emergency_mode else "정상 모드 복귀",
+    }

@@ -19,9 +19,11 @@ class Brand(Base):
     name = Column(String, unique=True, index=True)
     business_number = Column(String, nullable=True)
     support_email = Column(String, nullable=True)
-    logo_url = Column(String, nullable=True)     
-    homepage = Column(String, nullable=True)     
-    
+    logo_url = Column(String, nullable=True)
+    homepage = Column(String, nullable=True)
+    kakao_profile_key = Column(String, nullable=True)   # 브랜드 공용 알림톡 채널 프로필 키
+    sms_sender_number = Column(String, nullable=True)   # 브랜드 공용 SMS 발신번호
+
     groups = relationship("Group", back_populates="brand")
     stores = relationship("Store", back_populates="brand")
     admins = relationship("User", back_populates="brand")
@@ -94,6 +96,14 @@ class Store(Base):
     kitchen_printer_host = Column(String, default="")
     kitchen_printer_port = Column(String, default="9100")
     kitchen_printer_baud = Column(Integer, default=9600)
+
+    # 알림 설정 (PLATFORM: 플랫폼 공용채널 | OWN: 가게 자체채널 | BRAND: 브랜드채널 | DISABLED: 비활성)
+    notification_type = Column(String, default="PLATFORM")
+    kakao_profile_key = Column(String, nullable=True)   # OWN 타입일 때 가게 자체 프로필 키
+    sms_sender_number = Column(String, nullable=True)   # OWN 타입일 때 가게 자체 발신번호
+
+    # 긴급 모드: True이면 선불 결제를 차단하고 후불(현금/카드단말기)로 강제 전환
+    is_emergency_mode = Column(Boolean, default=False)
 
 # ⚠️ 2그룹: 예외 (관리자 때문에 nullable=True 유지)
 class User(Base):
@@ -247,6 +257,8 @@ class Order(Base):
     merchant_uid = Column(String, unique=True, nullable=True)
     paid_amount = Column(Integer, default=0)
     order_type = Column(String, default="DINE_IN") # 'DINE_IN', 'TAKEOUT'
+
+    customer_phone = Column(String, nullable=True)  # 포장 알림 수신 전화번호
 
     # 현금영수증
     cash_receipt_status = Column(String, nullable=True, default="NONE")  # NONE | ISSUED | FAILED | CANCELLED

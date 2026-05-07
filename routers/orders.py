@@ -16,6 +16,7 @@ from connection_manager import manager  # 웹소켓 브로드캐스트
 
 # 공통 함수 (utils.py)
 from utils import verify_store_permission, send_discord_alert, create_audit_log
+from services.notification import send_order_received, send_order_ready
 
 # 포트원 API 키 설정 (.env 또는 환경 변수에서 로드)
 PORTONE_API_KEY = os.getenv("PORTONE_API_KEY")
@@ -119,32 +120,40 @@ async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)
     is_post = getattr(order, 'is_post_pay', False) or getattr(order, 'payment_method', '') == "POST_PAY"
     
     if is_post:
-        created_order.payment_status = "DEFERRED" 
+        created_order.payment_status = "DEFERRED"
         db.commit()
         db.refresh(created_order)
-        
+
         try:
             items_list = [{"menu_name": item.menu_name, "quantity": item.quantity, "options": item.options_desc or ""} for item in created_order.items]
             created_at_val = created_order.created_at
             created_at_str = created_at_val.strftime("%Y-%m-%d %H:%M:%S") if hasattr(created_at_val, 'strftime') else str(created_at_val)
 
             message = json.dumps({
-                "type": "NEW_ORDER", 
-                "order_id": created_order.id, 
+                "type": "NEW_ORDER",
+                "order_id": created_order.id,
                 "daily_number": created_order.daily_number,
-                "table_name": created_order.table.name if created_order.table else "Unknown", 
-                "created_at": created_at_str, 
+                "table_name": created_order.table.name if created_order.table else "Unknown",
+                "created_at": created_at_str,
                 "items": items_list,
                 "order_type": order.order_type,
-                "is_post_pay": True 
+                "is_post_pay": True
             }, ensure_ascii=False)
-            
+
             await manager.broadcast(message, store_id=int(created_order.store_id))
         except Exception as e:
-            print(f"웹소켓 브로드캐스트 에러: {e}") 
+            print(f"웹소켓 브로드캐스트 에러: {e}")
+
+        # 후불 포장 주문 → 주문 접수 즉시 알림
+        try:
+            store = db.query(models.Store).filter(models.Store.id == created_order.store_id).first()
+            if store:
+                send_order_received(created_order, store)
+        except Exception as e:
+            print(f"[알림] 주문 접수 알림 오류: {e}")
     else:
-        db.commit() 
-        
+        db.commit()
+
     return created_order
 
 
@@ -160,11 +169,16 @@ async def verify_payment(payload: schemas.PaymentVerifyRequest, db: Session = De
         raise HTTPException(status_code=400, detail="잘못된 주문 번호 형식")
 
     order = db.query(models.Order).filter(models.Order.id == order_id).first()
-    if not order: 
+    if not order:
         raise HTTPException(status_code=404, detail="주문을 찾을 수 없습니다.")
-        
-    if order.payment_status == "PAID": 
+
+    if order.payment_status == "PAID":
         return {"status": "already_paid", "message": "이미 처리된 주문입니다."}
+
+    # 긴급 모드 중 선불 결제 차단
+    store = db.query(models.Store).filter(models.Store.id == order.store_id).first()
+    if store and store.is_emergency_mode:
+        raise HTTPException(status_code=503, detail="EMERGENCY_MODE")
 
     try:
         token_res = requests.post(
@@ -246,6 +260,13 @@ async def verify_payment(payload: schemas.PaymentVerifyRequest, db: Session = De
         if store:
             from routers.printer import try_auto_print_receipt
             try_auto_print_receipt(order, store)
+
+        # 선불 포장 주문 결제 완료 → 주문 접수 알림
+        try:
+            if store:
+                send_order_received(order, store)
+        except Exception as e:
+            print(f"[알림] 주문 접수 알림 오류: {e}")
 
         return {"status": "success", "message": "완료", "daily_number": order.daily_number}
 
@@ -434,19 +455,27 @@ async def complete_order(order_id: int, db: Session = Depends(get_db), current_u
     # 3. 실시간 신호 전송
     try:
         await manager.broadcast(json.dumps({
-            "type": "ORDER_COMPLETED", 
+            "type": "ORDER_COMPLETED",
             "order_id": order_id,
             "table_id": table_id
         }, ensure_ascii=False), store_id=int(store_id))
-        
+
         if table_id:
             await manager.broadcast(json.dumps({
                 "type": "TABLE_STATUS_CHANGED",
                 "table_id": table_id
             }), store_id=int(store_id))
-    except: 
+    except:
         pass
-    
+
+    # 4. 포장 완료 알림
+    try:
+        store = db.query(models.Store).filter(models.Store.id == store_id).first()
+        if store:
+            send_order_ready(order, store)
+    except Exception as e:
+        print(f"[알림] 포장 완료 알림 오류: {e}")
+
     return {"message": "조리 완료 처리되었습니다."}
 
 @router.patch("/orders/{order_id}/target-time")

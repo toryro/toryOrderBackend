@@ -6,13 +6,24 @@ from datetime import datetime
 # --- 브랜드(본사) 스키마 ---
 class BrandBase(BaseModel):
     name: str
-    logo_url: Optional[str] = None      
-    homepage: Optional[str] = None      
+    logo_url: Optional[str] = None
+    homepage: Optional[str] = None
     support_email: Optional[str] = None
     business_number: Optional[str] = None
+    kakao_profile_key: Optional[str] = None
+    sms_sender_number: Optional[str] = None
 
 class BrandCreate(BrandBase):
     pass
+
+class BrandUpdate(BaseModel):
+    name: Optional[str] = None
+    logo_url: Optional[str] = None
+    homepage: Optional[str] = None
+    support_email: Optional[str] = None
+    business_number: Optional[str] = None
+    kakao_profile_key: Optional[str] = None
+    sms_sender_number: Optional[str] = None
 
 class BrandResponse(BrandBase):
     id: int
@@ -178,6 +189,10 @@ class StoreBase(BaseModel):
     kitchen_printer_host: Optional[str] = ""
     kitchen_printer_port: Optional[str] = "9100"
     kitchen_printer_baud: Optional[int] = 9600
+    notification_type: Optional[str] = "PLATFORM"
+    kakao_profile_key: Optional[str] = None
+    sms_sender_number: Optional[str] = None
+    is_emergency_mode: Optional[bool] = False
 
 class StoreCreate(StoreBase):
     group_id: Optional[int] = None 
@@ -220,6 +235,10 @@ class StoreUpdate(BaseModel):
     kitchen_printer_host: Optional[str] = None
     kitchen_printer_port: Optional[str] = None
     kitchen_printer_baud: Optional[int] = None
+    notification_type: Optional[str] = None
+    kakao_profile_key: Optional[str] = None
+    sms_sender_number: Optional[str] = None
+    is_emergency_mode: Optional[bool] = None
 
 class OrderBase(BaseModel):
     store_id: int
@@ -303,7 +322,8 @@ class OrderCreate(OrderBase):
     items: List[OrderItemCreate]
     is_post_pay: bool = False
     order_type: str = "DINE_IN"
-    session_token: Optional[str] = None  # 홀 테이블 방문 세션 토큰 (퇴석 여부 검증용)
+    session_token: Optional[str] = None
+    customer_phone: Optional[str] = None  # 포장 알림 수신 전화번호 (선택)
 
 class OptionResponse(OptionBase):
     id: int

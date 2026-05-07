@@ -46,3 +46,4 @@ websockets==16.0
 prometheus-fastapi-instrumentator
 prometheus-client
 sentry-sdk[fastapi]
+gunicorn==23.0.0
