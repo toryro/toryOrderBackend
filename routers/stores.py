@@ -588,3 +588,203 @@ async def toggle_emergency_mode(
         "is_emergency_mode": store.is_emergency_mode,
         "message": "긴급 모드 활성화" if store.is_emergency_mode else "정상 모드 복귀",
     }
+
+
+# =========================================================
+# 일마감 (Daily Closing)
+# =========================================================
+
+def _build_closing_summary(store_id: int, business_date: str, db: Session):
+    """영업일 기준 하루치 주문을 집계해 마감 데이터를 반환."""
+    from datetime import datetime as dt, timedelta
+    import json as _json
+
+    store = db.query(models.Store).filter(models.Store.id == store_id).first()
+    closing_hour = int(store.closing_hour or 0) if store else 0
+
+    start_dt = dt.strptime(business_date, "%Y-%m-%d").replace(hour=closing_hour, minute=0, second=0)
+    end_dt   = start_dt + timedelta(days=1)
+
+    orders = db.query(models.Order).filter(
+        models.Order.store_id == store_id,
+        models.Order.payment_status.in_(["PAID", "DEFERRED", "PARTIAL_CANCELLED", "CANCELLED"]),
+        models.Order.created_at >= start_dt,
+        models.Order.created_at < end_dt,
+    ).all()
+
+    paid_orders      = [o for o in orders if o.payment_status in ["PAID", "PARTIAL_CANCELLED"]]
+    deferred_orders  = [o for o in orders if o.payment_status == "DEFERRED"]
+    cancelled_orders = [o for o in orders if o.payment_status == "CANCELLED"]
+
+    total_revenue    = sum(o.paid_amount or o.total_price for o in paid_orders)
+    deferred_revenue = sum(o.total_price for o in deferred_orders)
+    cancelled_amount = sum(o.total_price for o in cancelled_orders)
+    order_count      = len(paid_orders)
+
+    # 결제수단별 분리
+    card_revenue = 0
+    cash_revenue = 0
+    method_breakdown: dict = {}
+    for o in paid_orders:
+        m = (o.payment_method or "기타").lower()
+        amt = o.paid_amount or o.total_price
+        if m in ("card",):
+            card_revenue += amt
+        elif m in ("cash",):
+            cash_revenue += amt
+        method_breakdown.setdefault(m, {"count": 0, "revenue": 0})
+        method_breakdown[m]["count"] += 1
+        method_breakdown[m]["revenue"] += amt
+
+    # 메뉴별 top10 스냅샷
+    menu_data: dict = {}
+    for o in paid_orders:
+        for item in o.items:
+            if item.is_cancelled:
+                continue
+            menu_data.setdefault(item.menu_name, {"count": 0, "revenue": 0})
+            menu_data[item.menu_name]["count"] += item.quantity
+            menu_data[item.menu_name]["revenue"] += item.price * item.quantity
+    top_menus = sorted(
+        [{"name": k, "count": v["count"], "revenue": v["revenue"]} for k, v in menu_data.items()],
+        key=lambda x: x["revenue"], reverse=True
+    )[:10]
+
+    snapshot = _json.dumps({
+        "method_breakdown": method_breakdown,
+        "top_menus": top_menus,
+        "deferred_order_count": len(deferred_orders),
+        "cancelled_count": len(cancelled_orders),
+        "closing_hour": closing_hour,
+    }, ensure_ascii=False)
+
+    return {
+        "total_revenue":    total_revenue,
+        "order_count":      order_count,
+        "card_revenue":     card_revenue,
+        "cash_revenue":     cash_revenue,
+        "deferred_revenue": deferred_revenue,
+        "cancelled_amount": cancelled_amount,
+        "cancelled_count":  len(cancelled_orders),
+        "snapshot_json":    snapshot,
+        "closing_hour":     closing_hour,
+        "deferred_count":   len(deferred_orders),
+    }
+
+
+@router.get("/stores/{store_id}/daily-closing/today-summary")
+def get_today_closing_summary(
+    store_id: int,
+    business_date: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user),
+):
+    """지정 영업일의 마감 요약 + 이미 마감됐는지 여부 반환."""
+    verify_store_permission(db, current_user, store_id)
+
+    existing = db.query(models.DailyClosing).filter(
+        models.DailyClosing.store_id == store_id,
+        models.DailyClosing.business_date == business_date,
+    ).first()
+
+    summary = _build_closing_summary(store_id, business_date, db)
+    summary["is_closed"] = existing is not None
+    if existing:
+        summary["closing_id"]     = existing.id
+        summary["closed_at"]      = existing.closed_at.isoformat() if existing.closed_at else None
+        summary["closed_by_name"] = existing.closed_by.name if existing.closed_by else None
+        summary["memo"]           = existing.memo
+    return summary
+
+
+@router.post("/stores/{store_id}/daily-closing", response_model=schemas.DailyClosingResponse)
+def confirm_daily_closing(
+    store_id: int,
+    payload: schemas.DailyClosingCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user),
+):
+    """영업일 마감 확정. 동일 날짜 중복 마감 불가."""
+    verify_store_permission(db, current_user, store_id)
+
+    existing = db.query(models.DailyClosing).filter(
+        models.DailyClosing.store_id == store_id,
+        models.DailyClosing.business_date == payload.business_date,
+    ).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="해당 날짜는 이미 마감 처리되었습니다.")
+
+    summary = _build_closing_summary(store_id, payload.business_date, db)
+
+    closing = models.DailyClosing(
+        store_id         = store_id,
+        business_date    = payload.business_date,
+        total_revenue    = summary["total_revenue"],
+        order_count      = summary["order_count"],
+        card_revenue     = summary["card_revenue"],
+        cash_revenue     = summary["cash_revenue"],
+        deferred_revenue = summary["deferred_revenue"],
+        cancelled_amount = summary["cancelled_amount"],
+        cancelled_count  = summary["cancelled_count"],
+        memo             = payload.memo,
+        closed_by_id     = current_user.id,
+        snapshot_json    = summary["snapshot_json"],
+    )
+    db.add(closing)
+    db.commit()
+    db.refresh(closing)
+
+    create_audit_log(
+        db=db, user_id=current_user.id, action="DAILY_CLOSING",
+        target_type="STORE", target_id=store_id,
+        details=f"일마감 확정: [{payload.business_date}] 매출 {summary['total_revenue']:,}원",
+    )
+
+    result = schemas.DailyClosingResponse.model_validate(closing).model_dump()
+    result["closed_by_name"] = closing.closed_by.name if closing.closed_by else None
+    return result
+
+
+@router.get("/stores/{store_id}/daily-closing", response_model=List[schemas.DailyClosingResponse])
+def get_closing_history(
+    store_id: int,
+    limit: int = 60,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user),
+):
+    """마감 이력 최신순 반환."""
+    verify_store_permission(db, current_user, store_id)
+
+    closings = (
+        db.query(models.DailyClosing)
+        .filter(models.DailyClosing.store_id == store_id)
+        .order_by(models.DailyClosing.business_date.desc())
+        .limit(limit)
+        .all()
+    )
+    result = []
+    for c in closings:
+        row = schemas.DailyClosingResponse.model_validate(c).model_dump()
+        row["closed_by_name"] = c.closed_by.name if c.closed_by else None
+        result.append(row)
+    return result
+
+
+@router.get("/stores/{store_id}/daily-closing/{closing_id}", response_model=schemas.DailyClosingResponse)
+def get_closing_detail(
+    store_id: int,
+    closing_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user),
+):
+    """특정 마감 상세 조회."""
+    verify_store_permission(db, current_user, store_id)
+    closing = db.query(models.DailyClosing).filter(
+        models.DailyClosing.id == closing_id,
+        models.DailyClosing.store_id == store_id,
+    ).first()
+    if not closing:
+        raise HTTPException(status_code=404, detail="마감 기록을 찾을 수 없습니다.")
+    result = schemas.DailyClosingResponse.model_validate(closing).model_dump()
+    result["closed_by_name"] = closing.closed_by.name if closing.closed_by else None
+    return result

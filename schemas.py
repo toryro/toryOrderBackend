@@ -522,3 +522,25 @@ class TableTokenResponse(BaseModel):
     order_type_setting: str
     is_virtual: bool = False
     session_token: Optional[str] = None  # 홀 테이블 방문 세션 토큰
+
+# --- 일마감 스키마 ---
+class DailyClosingCreate(BaseModel):
+    business_date: str  # "YYYY-MM-DD"
+    memo: Optional[str] = None
+
+class DailyClosingResponse(BaseModel):
+    id: int
+    store_id: int
+    business_date: str
+    total_revenue: int
+    order_count: int
+    card_revenue: int
+    cash_revenue: int
+    deferred_revenue: int
+    cancelled_amount: int
+    cancelled_count: int
+    memo: Optional[str] = None
+    closed_by_name: Optional[str] = None
+    closed_at: datetime
+    snapshot_json: Optional[str] = None
+    model_config = ConfigDict(from_attributes=True)

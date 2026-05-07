@@ -365,3 +365,25 @@ class PasswordResetToken(Base):
     is_used = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     user = relationship("User")
+
+class DailyClosing(Base):
+    __tablename__ = "daily_closings"
+    id = Column(Integer, primary_key=True, index=True)
+    store_id = Column(Integer, ForeignKey("stores.id"), index=True, nullable=False)
+    business_date = Column(String, index=True, nullable=False)  # "YYYY-MM-DD" 영업일 기준
+
+    total_revenue = Column(Integer, default=0)
+    order_count = Column(Integer, default=0)
+    card_revenue = Column(Integer, default=0)
+    cash_revenue = Column(Integer, default=0)
+    deferred_revenue = Column(Integer, default=0)
+    cancelled_amount = Column(Integer, default=0)
+    cancelled_count = Column(Integer, default=0)
+
+    memo = Column(String, nullable=True)
+    closed_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    closed_at = Column(DateTime, default=datetime.now)
+    snapshot_json = Column(String, nullable=True)  # 결제수단별·메뉴별 상세 JSON
+
+    store = relationship("Store")
+    closed_by = relationship("User")
