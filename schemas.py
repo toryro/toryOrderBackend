@@ -387,6 +387,7 @@ class OrderResponse(OrderBase):
     cooking_status: Optional[str] = "PENDING"
     target_time: Optional[int] = 15
     order_type: str = "DINE_IN"
+    customer_phone: Optional[str] = None
     cash_receipt_status: Optional[str] = "NONE"
     cash_receipt_number: Optional[str] = None
     cash_receipt_type: Optional[str] = None
