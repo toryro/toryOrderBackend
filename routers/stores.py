@@ -788,3 +788,118 @@ def get_closing_detail(
     result = schemas.DailyClosingResponse.model_validate(closing).model_dump()
     result["closed_by_name"] = closing.closed_by.name if closing.closed_by else None
     return result
+
+# =========================================================
+# 📊 매출 리포트 (점주용 A안 + 브랜드 관리자용 B안)
+# =========================================================
+
+from datetime import date as _date, timedelta as _timedelta
+
+@router.get("/stores/{store_id}/reports/period")
+def get_store_report(
+    store_id: int,
+    start_date: str,
+    end_date: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user),
+):
+    """점주용 기간별 매출 리포트 (daily_closings 기반)"""
+    verify_store_permission(db, current_user, store_id)
+
+    start = _date.fromisoformat(start_date)
+    end   = _date.fromisoformat(end_date)
+
+    closings = db.query(models.DailyClosing).filter(
+        models.DailyClosing.store_id == store_id,
+        models.DailyClosing.business_date >= start_date,
+        models.DailyClosing.business_date <= end_date,
+    ).order_by(models.DailyClosing.business_date).all()
+
+    period_stats = []
+    top_menus_map = {}
+
+    for c in closings:
+        period_stats.append({
+            "date": c.business_date,
+            "revenue": c.total_revenue,
+            "order_count": c.order_count,
+            "card": c.card_revenue,
+            "cash": c.cash_revenue,
+            "deferred": c.deferred_revenue,
+            "cancelled_amount": c.cancelled_amount,
+        })
+        if c.snapshot_json:
+            try:
+                snap = json.loads(c.snapshot_json)
+                for m in snap.get("top_menus", []):
+                    key = m["name"]
+                    if key not in top_menus_map:
+                        top_menus_map[key] = {"name": key, "count": 0, "revenue": 0}
+                    top_menus_map[key]["count"]   += m.get("count", 0)
+                    top_menus_map[key]["revenue"] += m.get("revenue", 0)
+            except Exception:
+                pass
+
+    top_menus = sorted(top_menus_map.values(), key=lambda x: x["revenue"], reverse=True)[:10]
+
+    totals = {
+        "revenue":          sum(s["revenue"]          for s in period_stats),
+        "order_count":      sum(s["order_count"]      for s in period_stats),
+        "card":             sum(s["card"]             for s in period_stats),
+        "cash":             sum(s["cash"]             for s in period_stats),
+        "deferred":         sum(s["deferred"]         for s in period_stats),
+        "cancelled_amount": sum(s["cancelled_amount"] for s in period_stats),
+        "closing_count":    len(closings),
+    }
+
+    return {"period_stats": period_stats, "totals": totals, "top_menus": top_menus}
+
+
+@router.get("/brands/{brand_id}/reports/stores")
+def get_brand_report(
+    brand_id: int,
+    start_date: str,
+    end_date: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user),
+):
+    """브랜드 관리자용 매장별 매출 비교 리포트"""
+    brand = db.query(models.Brand).filter(models.Brand.id == brand_id).first()
+    if not brand:
+        raise HTTPException(status_code=404, detail="브랜드를 찾을 수 없습니다.")
+    if current_user.role not in ("SUPER_ADMIN", "BRAND_ADMIN", "GROUP_ADMIN"):
+        if current_user.brand_id != brand_id:
+            raise HTTPException(status_code=403, detail="권한이 없습니다.")
+
+    stores = db.query(models.Store).filter(models.Store.brand_id == brand_id).all()
+
+    store_stats = []
+    for store in stores:
+        closings = db.query(models.DailyClosing).filter(
+            models.DailyClosing.store_id == store.id,
+            models.DailyClosing.business_date >= start_date,
+            models.DailyClosing.business_date <= end_date,
+        ).all()
+        store_stats.append({
+            "store_id":      store.id,
+            "store_name":    store.name,
+            "revenue":       sum(c.total_revenue   for c in closings),
+            "order_count":   sum(c.order_count     for c in closings),
+            "card":          sum(c.card_revenue    for c in closings),
+            "cash":          sum(c.cash_revenue    for c in closings),
+            "deferred":      sum(c.deferred_revenue for c in closings),
+            "closing_count": len(closings),
+        })
+
+    store_stats.sort(key=lambda x: x["revenue"], reverse=True)
+
+    totals = {
+        "revenue":     sum(s["revenue"]     for s in store_stats),
+        "order_count": sum(s["order_count"] for s in store_stats),
+    }
+
+    return {
+        "brand_name":  brand.name,
+        "store_stats": store_stats,
+        "totals":      totals,
+    }
