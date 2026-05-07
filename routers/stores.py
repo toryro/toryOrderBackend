@@ -44,8 +44,39 @@ def read_brands(db: Session = Depends(get_db)):
 @router.get("/brands/{brand_id}", response_model=schemas.BrandResponse)
 def read_brand(brand_id: int, db: Session = Depends(get_db)):
     brand = db.query(models.Brand).filter(models.Brand.id == brand_id).first()
-    if not brand: 
+    if not brand:
         raise HTTPException(status_code=404, detail="Brand not found")
+    return brand
+
+@router.patch("/brands/{brand_id}", response_model=schemas.BrandResponse)
+def update_brand(
+    brand_id: int,
+    brand_update: schemas.BrandUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user),
+):
+    if current_user.role == models.UserRole.SUPER_ADMIN:
+        pass
+    elif current_user.role == models.UserRole.BRAND_ADMIN:
+        if current_user.brand_id != brand_id:
+            raise HTTPException(status_code=403, detail="본인 브랜드만 수정할 수 있습니다.")
+    else:
+        raise HTTPException(status_code=403, detail="권한이 없습니다.")
+
+    brand = db.query(models.Brand).filter(models.Brand.id == brand_id).first()
+    if not brand:
+        raise HTTPException(status_code=404, detail="Brand not found")
+
+    for key, value in brand_update.dict(exclude_unset=True).items():
+        setattr(brand, key, value)
+    db.commit()
+    db.refresh(brand)
+
+    create_audit_log(
+        db=db, user_id=current_user.id, action="UPDATE_BRAND",
+        target_type="BRAND", target_id=brand.id,
+        details=f"브랜드 정보 수정: [{brand.name}]",
+    )
     return brand
 
 @router.post("/groups/", response_model=schemas.GroupResponse)
