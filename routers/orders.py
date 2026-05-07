@@ -4,6 +4,8 @@ from typing import List
 import json
 import os
 import requests
+import hmac
+import hashlib
 from datetime import datetime
 
 # 프로젝트 내부 모듈
@@ -24,6 +26,12 @@ PORTONE_API_SECRET = os.getenv("PORTONE_API_SECRET")
 
 # 라우터 생성
 router = APIRouter(tags=["Orders & Payments"])
+
+
+def _order_view_token(order_id: int) -> str:
+    """주문 상태 조회용 공개 토큰 (SECRET_KEY 기반 HMAC, 16자)"""
+    key = os.getenv("SECRET_KEY", "fallback").encode()
+    return hmac.new(key, str(order_id).encode(), hashlib.sha256).hexdigest()[:16]
 
 
 def _build_cash_receipt_body(items, total_amount: int, cr_merchant_uid: str, cr: schemas.CashReceiptRequest) -> dict:
@@ -60,7 +68,7 @@ def _get_portone_token() -> str:
 # 🛒 [그룹 1] 주문 생성 및 결제 (손님 & 직원 공통)
 # =========================================================
 
-@router.post("/orders/", response_model=schemas.OrderResponse)
+@router.post("/orders/")
 async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)):
     now = datetime.now()
     current_time_str = now.strftime("%H:%M") 
@@ -154,7 +162,9 @@ async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)
     else:
         db.commit()
 
-    return created_order
+    result = schemas.OrderResponse.model_validate(created_order).model_dump()
+    result["view_token"] = _order_view_token(created_order.id)
+    return result
 
 
 @router.post("/payments/complete")
@@ -268,7 +278,13 @@ async def verify_payment(payload: schemas.PaymentVerifyRequest, db: Session = De
         except Exception as e:
             print(f"[알림] 주문 접수 알림 오류: {e}")
 
-        return {"status": "success", "message": "완료", "daily_number": order.daily_number}
+        return {
+            "status": "success",
+            "message": "완료",
+            "daily_number": order.daily_number,
+            "order_id": order.id,
+            "view_token": _order_view_token(order.id),
+        }
 
     except Exception as e:
         send_discord_alert(f"결제 검증 중 에러 발생!\n주문번호: {order_id}\n내용: {str(e)}")
@@ -808,3 +824,40 @@ def read_store_order_history(
         order_data["table_name"] = o.table.name if o.table else "포장/미지정"
         result.append(order_data)
     return result
+
+# =========================================================
+# 📦 주문 상태 공개 조회 (고객용, 인증 불필요)
+# =========================================================
+
+@router.get("/orders/{order_id}/status")
+def get_order_status(order_id: int, token: str, db: Session = Depends(get_db)):
+    if token != _order_view_token(order_id):
+        raise HTTPException(status_code=403, detail="유효하지 않은 접근입니다.")
+
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="주문을 찾을 수 없습니다.")
+
+    store = db.query(models.Store).filter(models.Store.id == order.store_id).first()
+
+    return {
+        "order_id": order.id,
+        "daily_number": order.daily_number,
+        "payment_status": order.payment_status,
+        "cooking_status": order.cooking_status or "PENDING",
+        "is_completed": order.is_completed,
+        "store_name": store.name if store else "",
+        "order_type": order.order_type,
+        "target_time": order.target_time,
+        "items": [
+            {
+                "menu_name": item.menu_name,
+                "quantity": item.quantity,
+                "options_desc": item.options_desc or "",
+                "is_cancelled": item.is_cancelled,
+            }
+            for item in order.items
+            if not item.is_cancelled
+        ],
+        "created_at": order.created_at.isoformat() if order.created_at else None,
+    }
