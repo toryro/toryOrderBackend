@@ -133,7 +133,7 @@ async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)
         db.refresh(created_order)
 
         try:
-            items_list = [{"menu_name": item.menu_name, "quantity": item.quantity, "options": item.options_desc or ""} for item in created_order.items]
+            items_list = [{"menu_name": item.menu_name, "quantity": item.quantity, "unit_price": item.price, "options": item.options_desc or ""} for item in created_order.items]
             created_at_val = created_order.created_at
             created_at_str = created_at_val.strftime("%Y-%m-%d %H:%M:%S") if hasattr(created_at_val, 'strftime') else str(created_at_val)
 
@@ -144,6 +144,7 @@ async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)
                 "table_name": created_order.table.name if created_order.table else "포장",
                 "created_at": created_at_str,
                 "items": items_list,
+                "total_price": created_order.total_price,
                 "order_type": order.order_type,
                 "is_post_pay": True
             }, ensure_ascii=False)
@@ -239,7 +240,7 @@ async def verify_payment(payload: schemas.PaymentVerifyRequest, db: Session = De
 
         # 주방으로 웹소켓 전송
         try:
-            items_list = [{"menu_name": item.menu_name, "quantity": item.quantity, "options": item.options_desc or ""} for item in order.items]
+            items_list = [{"menu_name": item.menu_name, "quantity": item.quantity, "unit_price": item.price, "options": item.options_desc or ""} for item in order.items]
             created_at_val = order.created_at
             created_at_str = created_at_val.strftime("%Y-%m-%d %H:%M:%S") if hasattr(created_at_val, 'strftime') else str(created_at_val)
 
@@ -251,6 +252,8 @@ async def verify_payment(payload: schemas.PaymentVerifyRequest, db: Session = De
                 "created_at": created_at_str,
                 "order_type": order.order_type,
                 "is_post_pay": False,
+                "payment_method": order.payment_method,
+                "total_price": order.total_price,
                 "items": items_list
             }, ensure_ascii=False)
 
@@ -356,11 +359,19 @@ async def collect_payment(
     create_audit_log(db=db, user_id=current_user.id, action="COLLECT_PAYMENT", target_type="ORDER", target_id=order_id, details=f"후불 수납 완료: 주문#{order.daily_number} {order.total_price:,}원 ({req.payment_method}){cr_detail}")
 
     try:
+        receipt_items = [{"menu_name": i.menu_name, "quantity": i.quantity, "unit_price": i.price, "options": i.options_desc or ""} for i in order.items if not i.is_cancelled]
         await manager.broadcast(json.dumps({
             "type": "PAYMENT_COLLECTED",
             "order_id": order_id,
             "table_id": order.table_id,
-        }), store_id=int(order.store_id))
+            "daily_number": order.daily_number,
+            "table_name": order.table.name if order.table else "포장",
+            "created_at": order.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "order_type": order.order_type,
+            "payment_method": order.payment_method,
+            "total_price": order.total_price,
+            "items": receipt_items,
+        }, ensure_ascii=False), store_id=int(order.store_id))
     except:
         pass
 
