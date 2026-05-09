@@ -141,7 +141,7 @@ async def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)
                 "type": "NEW_ORDER",
                 "order_id": created_order.id,
                 "daily_number": created_order.daily_number,
-                "table_name": created_order.table.name if created_order.table else "Unknown",
+                "table_name": created_order.table.name if created_order.table else "포장",
                 "created_at": created_at_str,
                 "items": items_list,
                 "order_type": order.order_type,
@@ -247,9 +247,10 @@ async def verify_payment(payload: schemas.PaymentVerifyRequest, db: Session = De
                 "type": "NEW_ORDER",
                 "order_id": order.id,
                 "daily_number": order.daily_number,
-                "table_name": order.table.name if order.table else "Unknown",
+                "table_name": order.table.name if order.table else "포장",
                 "created_at": created_at_str,
                 "order_type": order.order_type,
+                "is_post_pay": False,
                 "items": items_list
             }, ensure_ascii=False)
 

@@ -225,3 +225,35 @@ def reset_password(req: schemas.ResetPasswordRequest, db: Session = Depends(get_
     db.commit()
 
     return {"message": "비밀번호가 변경되었습니다."}
+
+
+# =========================================================
+# 🔑 비밀번호 변경 API (로그인 필요)
+# =========================================================
+
+@router.put("/auth/change-password")
+def change_password(
+    req: schemas.ChangePasswordRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(dependencies.get_current_user),
+):
+    """로그인된 사용자가 현재 비밀번호를 확인 후 새 비밀번호로 변경. STAFF는 불가."""
+    if current_user.role == models.UserRole.STAFF:
+        raise HTTPException(status_code=403, detail="직원 계정은 비밀번호를 직접 변경할 수 없습니다. 관리자에게 문의하세요.")
+
+    if not auth.verify_password(req.current_password, current_user.hashed_password):
+        raise HTTPException(status_code=400, detail="현재 비밀번호가 일치하지 않습니다.")
+
+    if len(req.new_password) < 6:
+        raise HTTPException(status_code=400, detail="새 비밀번호는 최소 6자 이상이어야 합니다.")
+
+    current_user.hashed_password = auth.get_password_hash(req.new_password)
+    db.commit()
+
+    create_audit_log(
+        db=db, user_id=current_user.id, action="CHANGE_PASSWORD",
+        target_type="USER", target_id=current_user.id,
+        details="본인 비밀번호 변경",
+    )
+
+    return {"message": "비밀번호가 변경되었습니다."}
