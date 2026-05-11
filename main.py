@@ -50,6 +50,7 @@ import dependencies
 
 # ✨ 라우터들 임포트 (auth 라우터는 내부 모듈과 이름이 겹치지 않게 별칭 사용)
 from routers import auth as auth_router, stores, menus, orders, tables, system, printer as printer_router
+from routers import payment_config as payment_config_router
 
 # DB 테이블 자동 생성
 models.Base.metadata.create_all(bind=engine)
@@ -181,6 +182,7 @@ app.include_router(orders.router)
 app.include_router(tables.router)
 app.include_router(system.router)
 app.include_router(printer_router.router)
+app.include_router(payment_config_router.router)
 
 # =========================================================
 # React SPA 서빙 (반드시 모든 라우터 등록 후 마지막에)

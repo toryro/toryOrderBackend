@@ -429,10 +429,30 @@ class StaffCallResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 class PaymentVerifyRequest(BaseModel):
-    imp_uid: str
-    merchant_uid: str
+    payment_id: str                          # PortOne v2: 결제 ID (프론트에서 직접 설정)
+    imp_uid: Optional[str] = None            # v1 레거시 (미사용)
+    merchant_uid: Optional[str] = None      # v1 레거시 별칭 (payment_id와 동일값)
     virtual_session_token: Optional[str] = None
-    session_token: Optional[str] = None  # 포장 카운터 세션 결제 완료 후 파기용
+    session_token: Optional[str] = None
+
+
+class PaymentConfigUpsert(BaseModel):
+    portone_store_id: str
+    portone_api_secret: str  # "__keep__" 전달 시 기존 값 유지
+    channel_key: str
+    pg_provider: str = "tosspayments"
+    is_active: bool = True
+
+
+class PaymentConfigResponse(BaseModel):
+    id: int
+    store_id: int
+    portone_store_id: str
+    channel_key: str
+    pg_provider: str
+    is_active: bool
+    model_config = ConfigDict(from_attributes=True)
+    # portone_api_secret 은 응답에서 제외 (보안)
 
 class CashReceiptRequest(BaseModel):
     identifier_type: str  # "phone" | "card" | "business"

@@ -105,6 +105,8 @@ class Store(Base):
     # 긴급 모드: True이면 선불 결제를 차단하고 후불(현금/카드단말기)로 강제 전환
     is_emergency_mode = Column(Boolean, default=False)
 
+    payment_config = relationship("StorePaymentConfig", back_populates="store", uselist=False)
+
 # ⚠️ 2그룹: 예외 (관리자 때문에 nullable=True 유지)
 class User(Base):
     __tablename__ = "users"
@@ -354,6 +356,22 @@ class TableSession(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     table = relationship("Table")
+
+
+class StorePaymentConfig(Base):
+    """가게별 PortOne v2 결제 설정. 가게당 1개."""
+    __tablename__ = "store_payment_configs"
+    id = Column(Integer, primary_key=True, index=True)
+    store_id = Column(Integer, ForeignKey("stores.id"), unique=True, nullable=False, index=True)
+    portone_store_id = Column(String, nullable=False)   # PortOne 콘솔의 가게 ID (store-xxxx)
+    portone_api_secret = Column(String, nullable=False) # PortOne v2 API Secret
+    channel_key = Column(String, nullable=False)        # PG 채널 키 (프론트 SDK에서 사용)
+    pg_provider = Column(String, default="tosspayments")
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    store = relationship("Store", back_populates="payment_config")
 
 
 class PasswordResetToken(Base):
